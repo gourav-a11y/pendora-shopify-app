@@ -23,27 +23,7 @@ export const loader = async ({ request, params }) => {
     return new Response("File not found.", { status: 404 });
   }
 
-  // Fetch file from Shopify CDN and proxy it with download headers
-  let cdnRes;
-  try {
-    cdnRes = await fetch(file.fileUrl);
-  } catch {
-    return new Response("Failed to fetch file.", { status: 502 });
-  }
-
-  if (!cdnRes.ok) {
-    return new Response("File unavailable.", { status: 404 });
-  }
-
-  const filename = encodeURIComponent(file.displayName || file.fileName || "download");
-
-  return new Response(cdnRes.body, {
-    status: 200,
-    headers: {
-      "Content-Type": file.mimeType || "application/octet-stream",
-      "Content-Disposition": `attachment; filename="${filename}"`,
-      "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*",
-    },
-  });
+  // Redirect directly to Shopify CDN — browser downloads at full CDN speed,
+  // no tunnel proxying, no double-hop. Start time < 1s.
+  return Response.redirect(file.fileUrl, 302);
 };
