@@ -79,9 +79,11 @@ export const loader = async ({ request, params }) => {
         document.body.appendChild(a);
         a.click();
         URL.revokeObjectURL(url);
+        // Auto-close tab — user stays on the thank you page
+        window.close();
+        // Fallback message if window.close() is blocked
         document.getElementById('title').textContent = 'Download started!';
-        document.getElementById('msg').textContent =
-          'Your file is downloading. You can close this tab.';
+        document.getElementById('msg').textContent = 'You can close this tab.';
       } catch {
         // Fallback: direct link (may open in browser for PDFs/images)
         document.getElementById('title').textContent = 'Ready to download';
