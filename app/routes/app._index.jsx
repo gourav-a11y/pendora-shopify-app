@@ -79,6 +79,10 @@ const NIGHT = {
   pill:       'rgba(212,149,10,0.10)',
 };
 
+// ── Transition helpers (left-to-right staggered sweep) ────────────────────────
+const TR  = "background 0.38s ease, color 0.35s ease, border-color 0.3s ease, box-shadow 0.38s ease";
+const TRD = "background 0.38s ease 0.12s, color 0.35s ease 0.12s, border-color 0.3s ease 0.12s, box-shadow 0.38s ease 0.12s";
+
 // ── SVG Icons ─────────────────────────────────────────────────────────────────
 const Ic = {
   box: (s = 18) => (
@@ -327,17 +331,17 @@ export default function HomePage() {
   const filteredShopify = shopifyProducts.filter((p) => p.title.toLowerCase().includes(wSearch.toLowerCase()));
 
   // ── Style helpers ──────────────────────────────────────────────────────────
-  const inp = { padding: "8px 12px", border: `1px solid ${t.inputBdr}`, borderRadius: "8px", background: t.inputBg, color: t.text, fontSize: "14px", outline: "none", width: "100%", boxSizing: "border-box" };
+  const inp = { padding: "8px 12px", border: `1px solid ${t.inputBdr}`, borderRadius: "8px", background: t.inputBg, color: t.text, fontSize: "14px", outline: "none", width: "100%", boxSizing: "border-box", transition: TR };
   const B = {
-    primary:   { border: "none", borderRadius: "8px", cursor: "pointer", fontWeight: 700, fontSize: "13px", display: "inline-flex", alignItems: "center", gap: "6px", padding: "9px 20px", background: t.active, color: t.accentText },
-    secondary: { border: `1px solid ${t.border}`, borderRadius: "8px", cursor: "pointer", fontWeight: 600, fontSize: "13px", display: "inline-flex", alignItems: "center", gap: "6px", padding: "8px 14px", background: t.surface, color: t.text },
-    danger:    { border: `1px solid ${t.dangerBdr}`, borderRadius: "8px", cursor: "pointer", fontWeight: 600, fontSize: "13px", display: "inline-flex", alignItems: "center", gap: "6px", padding: "8px 12px", background: t.dangerBg, color: t.danger },
-    ghost:     { border: `1px solid ${t.border}`, borderRadius: "8px", cursor: "pointer", fontWeight: 600, fontSize: "13px", display: "inline-flex", alignItems: "center", gap: "6px", padding: "8px 14px", background: "transparent", color: t.muted },
+    primary:   { border: "none", borderRadius: "8px", cursor: "pointer", fontWeight: 700, fontSize: "13px", display: "inline-flex", alignItems: "center", gap: "6px", padding: "9px 20px", background: t.active, color: t.accentText, transition: TR },
+    secondary: { border: `1px solid ${t.border}`, borderRadius: "8px", cursor: "pointer", fontWeight: 600, fontSize: "13px", display: "inline-flex", alignItems: "center", gap: "6px", padding: "8px 14px", background: t.surface, color: t.text, transition: TR },
+    danger:    { border: `1px solid ${t.dangerBdr}`, borderRadius: "8px", cursor: "pointer", fontWeight: 600, fontSize: "13px", display: "inline-flex", alignItems: "center", gap: "6px", padding: "8px 12px", background: t.dangerBg, color: t.danger, transition: TR },
+    ghost:     { border: `1px solid ${t.border}`, borderRadius: "8px", cursor: "pointer", fontWeight: 600, fontSize: "13px", display: "inline-flex", alignItems: "center", gap: "6px", padding: "8px 14px", background: "transparent", color: t.muted, transition: TR },
   };
 
   // ── Header bar ─────────────────────────────────────────────────────────────
   const renderHeader = () => (
-    <div style={{ background: t.headerBg, padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
+    <div style={{ background: t.headerBg, padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0, transition: TR }}>
       <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
         <div style={{ width: 34, height: 34, borderRadius: "9px", background: "rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>
           {Ic.spark(18)}
@@ -358,7 +362,7 @@ export default function HomePage() {
 
   // ── Outer shell ────────────────────────────────────────────────────────────
   const wrap = (inner) => (
-    <div style={{ position: "fixed", inset: 0, background: t.bg, color: t.text, display: "flex", flexDirection: "column", overflow: "hidden", fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
+    <div style={{ position: "fixed", inset: 0, background: t.bg, color: t.text, display: "flex", flexDirection: "column", overflow: "hidden", fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", transition: TR }}>
       {renderHeader()}
       {inner}
     </div>
@@ -369,12 +373,12 @@ export default function HomePage() {
     <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
 
       {/* Sidebar */}
-      <div style={{ width: "255px", flexShrink: 0, background: t.sidebar, borderRight: `1px solid ${t.sidebarBdr}`, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        <div style={{ padding: "11px 16px", borderBottom: `1px solid ${t.sidebarBdr}`, flexShrink: 0 }}>
+      <div style={{ width: "255px", flexShrink: 0, background: t.sidebar, borderRight: `1px solid ${t.sidebarBdr}`, display: "flex", flexDirection: "column", overflow: "hidden", transition: TR }}>
+        <div style={{ padding: "11px 16px", borderBottom: `1px solid ${t.sidebarBdr}`, flexShrink: 0, transition: TR }}>
           <div style={{ fontSize: "10px", fontWeight: 800, color: t.muted, textTransform: "uppercase", letterSpacing: "0.9px" }}>Your Products</div>
         </div>
         {/* Add New Product — top of list */}
-        <div onClick={openCreate} style={{ padding: "11px 14px", borderBottom: `1px solid ${t.sidebarBdr}`, background: mode === "create" ? t.activeBg : "transparent", borderLeft: `3px solid ${mode === "create" ? t.activeBdr : "transparent"}`, cursor: "pointer", display: "flex", alignItems: "center", gap: "10px", flexShrink: 0 }}>
+        <div onClick={openCreate} style={{ padding: "11px 14px", borderBottom: `1px solid ${t.sidebarBdr}`, background: mode === "create" ? t.activeBg : "transparent", borderLeft: `3px solid ${mode === "create" ? t.activeBdr : "transparent"}`, cursor: "pointer", display: "flex", alignItems: "center", gap: "10px", flexShrink: 0, transition: TR }}>
           <div style={{ width: 32, height: 32, borderRadius: "8px", background: t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: t.accent }}>
             {Ic.plus(15)}
           </div>
@@ -385,8 +389,8 @@ export default function HomePage() {
             const isActive = p.productId === selectedId && mode === "view";
             return (
               <div key={p.productId} onClick={() => selectProduct(p.productId)}
-                style={{ padding: "11px 14px", borderBottom: `1px solid ${t.sidebarBdr}`, background: isActive ? t.activeBg : "transparent", borderLeft: `3px solid ${isActive ? t.activeBdr : "transparent"}`, cursor: "pointer", display: "flex", alignItems: "center", gap: "10px" }}>
-                <div style={{ width: 32, height: 32, borderRadius: "8px", background: isActive ? (isDark ? "rgba(212,149,10,0.2)" : "rgba(86,120,112,0.18)") : t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: isActive ? t.active : t.accent, flexShrink: 0 }}>
+                style={{ padding: "11px 14px", borderBottom: `1px solid ${t.sidebarBdr}`, background: isActive ? t.activeBg : "transparent", borderLeft: `3px solid ${isActive ? t.activeBdr : "transparent"}`, cursor: "pointer", display: "flex", alignItems: "center", gap: "10px", transition: TR }}>
+                <div style={{ width: 32, height: 32, borderRadius: "8px", background: isActive ? (isDark ? "rgba(212,149,10,0.2)" : "rgba(86,120,112,0.18)") : t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: isActive ? t.active : t.accent, flexShrink: 0, transition: TR }}>
                   {Ic.box(16)}
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -403,7 +407,7 @@ export default function HomePage() {
       </div>
 
       {/* Right panel */}
-      <div style={{ flex: 1, overflowY: "auto", background: t.bg }}>
+      <div style={{ flex: 1, overflowY: "auto", background: t.bg, transition: TRD }}>
 
         {mode === "create" && (
           <div style={{ flex: 1, overflowY: "auto", display: "flex", justifyContent: "center", padding: "40px 32px" }}>
@@ -442,7 +446,7 @@ export default function HomePage() {
           return (
             <div style={{ padding: "22px 28px" }}>
               {/* Title */}
-              <div style={{ marginBottom: "20px", paddingBottom: "16px", borderBottom: `1px solid ${t.border}`, display: "flex", alignItems: "center", gap: "12px" }}>
+              <div style={{ marginBottom: "20px", paddingBottom: "16px", borderBottom: `1px solid ${t.border}`, display: "flex", alignItems: "center", gap: "12px", transition: TRD }}>
                 <div style={{ width: 42, height: 42, borderRadius: "11px", background: t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: t.accent, flexShrink: 0 }}>
                   {Ic.box(21)}
                 </div>
@@ -459,7 +463,7 @@ export default function HomePage() {
               )}
 
               {/* Upload */}
-              <div style={{ background: t.surface, border: `1px solid ${t.border}`, borderRadius: "12px", padding: "18px 20px", marginBottom: "16px", boxShadow: t.shadow }}>
+              <div style={{ background: t.surface, border: `1px solid ${t.border}`, borderRadius: "12px", padding: "18px 20px", marginBottom: "16px", boxShadow: t.shadow, transition: TRD }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "7px", marginBottom: "14px" }}>
                   <div style={{ color: t.active }}>{Ic.upload(15)}</div>
                   <span style={{ fontWeight: 800, fontSize: "11px", color: t.muted, textTransform: "uppercase", letterSpacing: "0.7px" }}>Upload File</span>
@@ -483,8 +487,8 @@ export default function HomePage() {
               </div>
 
               {/* Files */}
-              <div style={{ background: t.surface, borderRadius: "12px", border: `1px solid ${t.border}`, overflow: "hidden", boxShadow: t.shadow }}>
-                <div style={{ padding: "12px 18px", borderBottom: `1px solid ${t.border}`, display: "flex", alignItems: "center", gap: "7px" }}>
+              <div style={{ background: t.surface, borderRadius: "12px", border: `1px solid ${t.border}`, overflow: "hidden", boxShadow: t.shadow, transition: TRD }}>
+                <div style={{ padding: "12px 18px", borderBottom: `1px solid ${t.border}`, display: "flex", alignItems: "center", gap: "7px", transition: TRD }}>
                   <div style={{ color: t.active }}>{Ic.file(14)}</div>
                   <span style={{ fontWeight: 800, fontSize: "11px", color: t.muted, textTransform: "uppercase", letterSpacing: "0.7px" }}>Attached Files ({visibleFiles.length})</span>
                 </div>
@@ -492,9 +496,9 @@ export default function HomePage() {
                 {!visibleFiles.length
                   ? <div style={{ padding: "26px", textAlign: "center", color: t.faint, fontSize: "14px" }}>No files yet. Upload one above.</div>
                   : visibleFiles.map((file, idx) => (
-                    <div key={file.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 18px", borderBottom: idx < visibleFiles.length - 1 ? `1px solid ${t.border}` : "none" }}>
+                    <div key={file.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 18px", borderBottom: idx < visibleFiles.length - 1 ? `1px solid ${t.border}` : "none", transition: TRD }}>
                       <div style={{ display: "flex", alignItems: "center", gap: "11px" }}>
-                        <div style={{ width: 36, height: 36, borderRadius: "9px", background: t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: t.active, flexShrink: 0 }}>{Ic.file(18)}</div>
+                        <div style={{ width: 36, height: 36, borderRadius: "9px", background: t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: t.active, flexShrink: 0, transition: TRD }}>{Ic.file(18)}</div>
                         <div>
                           <div style={{ fontWeight: 600, fontSize: "14px", color: t.text }}>{file.displayName}</div>
                           {file.displayName !== file.fileName && <div style={{ fontSize: "11px", color: t.faint }}>{file.fileName}</div>}
