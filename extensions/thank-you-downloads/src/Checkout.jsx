@@ -1,6 +1,7 @@
 import {
   reactExtension,
   useAppMetafields,
+  useShop,
   BlockStack,
   Button,
   Heading,
@@ -14,6 +15,8 @@ export default reactExtension(
 );
 
 function ThankYouDownloads() {
+  const { myshopifyDomain } = useShop();
+
   // Reads product metafields written by the app on file upload — no HTTP needed.
   const metafields = useAppMetafields({ namespace: "pendora", key: "files" });
 
@@ -28,6 +31,8 @@ function ThankYouDownloads() {
 
   if (!allFiles.length) return null;
 
+  const proxyBase = `https://${myshopifyDomain}/apps/pendora`;
+
   return (
     <BlockStack spacing="loose">
       <Divider />
@@ -39,7 +44,7 @@ function ThankYouDownloads() {
               Your file &quot;{file.displayName}&quot; is ready to download
             </Text>
             <Button
-              to={file.fileUrl}
+              to={`${proxyBase}/api/download/${file.fileId}`}
               kind="primary"
             >
               ↓ Download your file
