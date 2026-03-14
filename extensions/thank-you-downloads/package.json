@@ -1,0 +1,10 @@
+{
+  "name": "thank-you-downloads",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@shopify/ui-extensions-react": "^2025.7.0",
+    "react": "^18.0.0",
+    "react-reconciler": "^0.29.0"
+  }
+}

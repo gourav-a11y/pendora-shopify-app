@@ -1,0 +1,17 @@
+api_version = "2025-07"
+
+[[extensions]]
+
+uid = "7b6e438f-a1cc-2763-f75f-615d7ce0c60000a5ee27"
+
+type = "ui_extension"
+name = "Thank You Downloads"
+handle = "thank-you-downloads"
+
+  [[extensions.metafields]]
+  namespace = "pendora"
+  key = "files"
+
+  [[extensions.targeting]]
+  module = "./src/Checkout.jsx"
+  target = "purchase.thank-you.block.render"
