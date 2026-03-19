@@ -6,7 +6,7 @@ import prisma from "../db.server";
 import { parseMultipart } from "../utils/parseMultipart.server";
 
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
-const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+const MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024; // 5GB
 const ALLOWED_EXTENSIONS = [
   ".pdf", ".zip", ".mp3", ".mp4", ".png", ".jpg", ".jpeg",
   ".gif", ".webp", ".mov", ".epub", ".docx", ".xlsx",
@@ -56,7 +56,7 @@ export const action = async ({ request }) => {
     if (!file || file.size === 0) continue;
 
     if (file.size > MAX_FILE_SIZE) {
-      errors.push(`"${file.filename}" exceeds 100MB limit.`);
+      errors.push(`"${file.filename}" exceeds 5GB limit.`);
       continue;
     }
 
@@ -85,7 +85,7 @@ export const action = async ({ request }) => {
         fileName: file.filename,
         filePath,
         mimeType: file.mimetype || "application/octet-stream",
-        fileSize: file.size,
+        fileSize: file.size != null ? BigInt(file.size) : null,
         displayName,
         downloadEnabled,
       },

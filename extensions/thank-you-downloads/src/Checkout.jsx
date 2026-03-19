@@ -3,10 +3,12 @@ import {
   useAppMetafields,
   useShop,
   BlockStack,
+  InlineStack,
   Button,
   Heading,
   Text,
   Divider,
+  View,
 } from "@shopify/ui-extensions-react/checkout";
 
 export default reactExtension(
@@ -32,22 +34,27 @@ function ThankYouDownloads() {
   const proxyBase = `https://${myshopifyDomain}/apps/pendora`;
 
   return (
-    <BlockStack spacing="loose">
+    <BlockStack spacing="base">
       <Divider />
-      <Heading level={2}>Pendora Digital Downloads</Heading>
-      <BlockStack spacing="base">
+      <BlockStack spacing="extraTight">
+        <Heading level={2}>Your Downloads</Heading>
+        <Text appearance="subdued">
+          {allFiles.length} {allFiles.length === 1 ? "file" : "files"} ready to download
+        </Text>
+      </BlockStack>
+      <BlockStack spacing="tight">
         {allFiles.map((file) => (
-          <BlockStack key={file.fileId} spacing="tight">
-            <Text appearance="subdued">
-              Your file &quot;{file.displayName}&quot; is ready to download
-            </Text>
+          <InlineStack key={file.fileId} spacing="base" blockAlignment="center">
+            <View inlineSize="fill">
+              <Text size="base" emphasis="bold">{file.displayName}</Text>
+            </View>
             <Button
               to={`${proxyBase}/api/download/${file.fileId}`}
-              kind="primary"
+              kind="secondary"
             >
-              ↓ Download your file
+              ↓ Download
             </Button>
-          </BlockStack>
+          </InlineStack>
         ))}
       </BlockStack>
     </BlockStack>

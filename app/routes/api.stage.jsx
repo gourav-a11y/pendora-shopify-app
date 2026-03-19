@@ -5,7 +5,7 @@ const ALLOWED_EXTENSIONS = [
   ".pdf", ".zip", ".mp3", ".mp4", ".png", ".jpg", ".jpeg",
   ".gif", ".webp", ".mov", ".epub", ".docx", ".xlsx",
 ];
-const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+const MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024; // 5GB
 
 /**
  * Two-phase upload endpoint — JSON only, no binary data, no tunnel issues.
@@ -49,7 +49,7 @@ export const action = async ({ request }) => {
         return Response.json({ error: `"${f.filename}" — file type not allowed.` }, { status: 400 });
       }
       if (f.fileSize > MAX_FILE_SIZE) {
-        return Response.json({ error: `"${f.filename}" exceeds 100MB limit.` }, { status: 400 });
+        return Response.json({ error: `"${f.filename}" exceeds 5GB limit.` }, { status: 400 });
       }
     }
 
@@ -94,90 +94,97 @@ export const action = async ({ request }) => {
     if (!files?.length) return Response.json({ error: "No files to save." }, { status: 400 });
     if (!productId) return Response.json({ error: "No product specified." }, { status: 400 });
 
-    const saved = [];
+    // Save all records in one transaction — single DB commit, no sequential round-trips.
+    let records;
+    try {
+      records = await prisma.$transaction(
+        files.map((f) =>
+          prisma.productFile.create({
+            data: {
+              shop: session.shop,
+              productId,
+              productTitle: productTitle || "",
+              fileName: f.filename,
+              fileUrl: f.resourceUrl,
+              mimeType: f.mimeType || "application/octet-stream",
+              fileSize: f.fileSize != null ? BigInt(f.fileSize) : null,
+              displayName: f.displayName || f.filename,
+              downloadEnabled: downloadEnabled !== false,
+            },
+          })
+        )
+      );
+    } catch (err) {
+      return Response.json({ error: "Failed to save files: " + err.message }, { status: 500 });
+    }
 
-    for (const f of files) {
-      // Register with Shopify Files API to get a permanent CDN URL
-      let fileUrl = f.resourceUrl; // fallback if fileCreate fails or times out
+    const saved = records.map((r, i) => ({ fileId: r.id, fileName: files[i].filename }));
+    const _shop = session.shop;
+
+    // Background: register all files with Shopify in ONE mutation, poll CDN URLs in
+    // parallel, then write the metafield exactly once when all polling is done.
+    ;(async () => {
       try {
+        // Register all files with Shopify Files API in a single mutation call.
         const fcRes = await admin.graphql(
           `#graphql
           mutation fileCreate($files: [FileCreateInput!]!) {
             fileCreate(files: $files) {
-              files {
-                id
-                fileStatus
-                ... on GenericFile { url }
-              }
+              files { id fileStatus ... on GenericFile { url } }
               userErrors { field message }
             }
           }`,
           {
             variables: {
-              files: [{
+              files: files.map((f) => ({
                 alt: f.displayName || f.filename,
                 contentType: "FILE",
                 originalSource: f.resourceUrl,
-              }],
+              })),
             },
           }
         );
         const fcData = await fcRes.json();
-        const created = fcData.data?.fileCreate;
-        const shopifyFileId = created?.files?.[0]?.id;
+        const shopifyFiles = fcData.data?.fileCreate?.files ?? [];
+        if (fcData.data?.fileCreate?.userErrors?.length || shopifyFiles.length === 0) return;
 
-        if (!created?.userErrors?.length && shopifyFileId) {
-          // fileCreate is async — poll until file is READY (max ~9s)
-          for (let attempt = 0; attempt < 6; attempt++) {
-            await new Promise((r) => setTimeout(r, attempt === 0 ? 500 : 1500));
-            const pollRes = await admin.graphql(
-              `#graphql
-              query PollFile($id: ID!) {
-                node(id: $id) {
-                  ... on GenericFile { fileStatus url }
-                }
-              }`,
-              { variables: { id: shopifyFileId } }
-            );
-            const pollData = await pollRes.json();
-            const pollFile = pollData.data?.node;
-            if (pollFile?.url) {
-              fileUrl = pollFile.url;
-              break;
+        // Poll all files in parallel — each finds its CDN URL independently.
+        // No DB reads inside the poll loop — just write when URL arrives.
+        await Promise.all(
+          shopifyFiles.map(async (sf, i) => {
+            const record = records[i];
+            if (!sf?.id) return;
+            for (let attempt = 0; attempt < 30; attempt++) {
+              await new Promise((r) => setTimeout(r, 2000));
+              const pollRes = await admin.graphql(
+                `#graphql query PollFile($id: ID!) { node(id: $id) { ... on GenericFile { fileStatus url } } }`,
+                { variables: { id: sf.id } }
+              );
+              const cdnUrl = (await pollRes.json()).data?.node?.url;
+              if (cdnUrl) {
+                await prisma.productFile.update({ where: { id: record.id }, data: { fileUrl: cdnUrl } });
+                break;
+              }
             }
-          }
-        }
-      } catch {
-        // fileCreate failed — use resourceUrl as fallback
-      }
-
-      const record = await prisma.productFile.create({
-        data: {
-          shop: session.shop,
-          productId,
-          productTitle: productTitle || "",
-          fileName: f.filename,
-          fileUrl,
-          mimeType: f.mimeType || "application/octet-stream",
-          fileSize: f.fileSize || 0,
-          displayName: f.displayName || f.filename,
-          downloadEnabled: downloadEnabled !== false,
-        },
-      });
-
-      saved.push({ fileId: record.id, fileName: f.filename });
-    }
-
-    // Fire-and-forget metafield update — don't block the response.
-    prisma.productFile.findMany({ where: { shop: session.shop, productId }, orderBy: { createdAt: "desc" } })
-      .then((allProductFiles) => {
-        const value = JSON.stringify(allProductFiles.map((f) => ({ fileId: f.id, displayName: f.displayName || f.fileName, fileUrl: f.fileUrl })));
-        return admin.graphql(
-          `mutation SetFilesMetafield($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { metafields { id } userErrors { field message } } }`,
-          { variables: { metafields: [{ ownerId: productId, namespace: "pendora", key: "files", type: "json", value }] } }
+          })
         );
-      })
-      .catch((err) => console.error("[Pendora] Metafield write failed:", err?.message ?? err));
+
+        // One single metafield update after all polling is done.
+        const allFiles = await prisma.productFile.findMany({
+          where: { shop: _shop, productId },
+          orderBy: { createdAt: "desc" },
+        });
+        const value = JSON.stringify(
+          allFiles.map((af) => ({ fileId: af.id, displayName: af.displayName || af.fileName, fileUrl: af.fileUrl }))
+        );
+        await admin.graphql(
+          `mutation SetFilesMetafield($m: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $m) { metafields { id } userErrors { field message } } }`,
+          { variables: { m: [{ ownerId: productId, namespace: "pendora", key: "files", type: "json", value }] } }
+        );
+      } catch (err) {
+        console.error("[Pendora] Background CDN update failed:", err?.message ?? err);
+      }
+    })();
 
     return Response.json({ saved });
   }

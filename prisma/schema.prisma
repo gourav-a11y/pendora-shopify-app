@@ -41,11 +41,12 @@ model ProductFile {
   fileName     String
   fileUrl      String
   mimeType     String?
-  fileSize     Int?
+  fileSize     BigInt?
   displayName     String?
   downloadEnabled Boolean  @default(true)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   @@index([shop, productId])
+  @@index([shop, createdAt])
 }

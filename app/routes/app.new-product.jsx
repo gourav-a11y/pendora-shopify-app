@@ -49,9 +49,12 @@ export const loader = async ({ request }) => {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function formatFileSize(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (!bytes) return "–";
+  const n = Number(bytes);
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB";
+  return (n / (1024 * 1024 * 1024)).toFixed(2) + " GB";
 }
 
 const STEP_LABELS = ["Select Product", "Upload Files", "Settings"];
@@ -298,7 +301,7 @@ export default function NewProductPage() {
                 + Add Files
               </s-button>
               <div style={{ fontSize: "12px", color: "#6d7175", marginTop: "6px" }}>
-                Max 100MB per file — PDF, ZIP, MP3, MP4, PNG, JPG, GIF, EPUB, DOCX, XLSX
+                Max 5 GB per file — PDF, ZIP, MP3, MP4, PNG, JPG, GIF, EPUB, DOCX, XLSX
               </div>
             </div>
 

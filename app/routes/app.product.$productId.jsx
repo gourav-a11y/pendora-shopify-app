@@ -6,10 +6,12 @@ import prisma from "../db.server";
 import { generateDownloadToken } from "../utils/token.server";
 
 function formatFileSize(bytes) {
-  if (!bytes) return "Unknown size";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (!bytes) return "–";
+  const n = Number(bytes);
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB";
+  return (n / (1024 * 1024 * 1024)).toFixed(2) + " GB";
 }
 
 // ─── Loader ──────────────────────────────────────────────────────────────────
@@ -234,7 +236,7 @@ export default function ProductDetailPage() {
               style={{ opacity: isBusy ? 0.5 : 1 }}
             />
             <div style={{ fontSize: "12px", color: "#6d7175", marginTop: "4px" }}>
-              Max 100MB — PDF, ZIP, MP3, MP4, PNG, JPG, GIF, EPUB, DOCX, XLSX
+              Max 5 GB — PDF, ZIP, MP3, MP4, PNG, JPG, GIF, EPUB, DOCX, XLSX
             </div>
           </div>
           <div>

@@ -7,9 +7,11 @@ import { generateDownloadToken } from "../utils/token.server";
 
 function formatFileSize(bytes) {
   if (!bytes) return "–";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  const n = Number(bytes);
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB";
+  return (n / (1024 * 1024 * 1024)).toFixed(2) + " GB";
 }
 
 // ── Color themes ──────────────────────────────────────────────────────────────
@@ -599,7 +601,7 @@ export default function ProductsPage() {
                       <input ref={fileInputRef} type="file" disabled={isBusy}
                         accept=".pdf,.zip,.mp3,.mp4,.png,.jpg,.jpeg,.gif,.webp,.mov,.epub,.docx,.xlsx"
                         style={{ color: t.text, fontSize: "13px", opacity: isBusy ? 0.5 : 1 }} />
-                      <div style={{ fontSize: "11px", color: t.faint, marginTop: "4px" }}>Max 100 MB — PDF, ZIP, MP3, MP4, PNG, JPG, GIF, EPUB, DOCX, XLSX</div>
+                      <div style={{ fontSize: "11px", color: t.faint, marginTop: "4px" }}>Max 5 GB — PDF, ZIP, MP3, MP4, PNG, JPG, GIF, EPUB, DOCX, XLSX</div>
                     </div>
                     <div>
                       <label style={{ display: "block", marginBottom: "5px", fontWeight: 600, fontSize: "13px", color: t.muted }}>Display Name</label>
@@ -748,7 +750,7 @@ function WizardPanel({ t, btn, input, isDark, step, setStep, search, setSearch, 
           <button onClick={() => wizardFileInputRef.current?.click()} style={btn("secondary", { marginBottom: "8px" })}>
             {Ic.plus(15)} Add Files
           </button>
-          <div style={{ fontSize: "11px", color: t.faint, marginBottom: "14px" }}>Max 100 MB — PDF, ZIP, MP3, MP4, PNG, JPG, GIF, EPUB, DOCX, XLSX</div>
+          <div style={{ fontSize: "11px", color: t.faint, marginBottom: "14px" }}>Max 5 GB — PDF, ZIP, MP3, MP4, PNG, JPG, GIF, EPUB, DOCX, XLSX</div>
           {wFiles.length === 0 ? (
             <div style={{ padding: "32px", border: `2px dashed ${t.border}`, borderRadius: "12px", textAlign: "center", color: t.muted, fontSize: "14px", marginBottom: "18px", background: t.surface }}>
               <div style={{ marginBottom: "6px", color: t.accent }}>{Ic.upload(28)}</div>
