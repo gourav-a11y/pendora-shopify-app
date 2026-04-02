@@ -95,6 +95,8 @@ export const action = async ({ request }) => {
     if (!productId) return Response.json({ error: "No product specified." }, { status: 400 });
 
     // Save all records in one transaction — single DB commit, no sequential round-trips.
+    // Chunked files: fileUrl = null, chunkUrls = JSON array of resourceUrls.
+    // Single files:  fileUrl = resourceUrl, chunkUrls = null (same as before).
     let records;
     try {
       records = await prisma.$transaction(
@@ -105,7 +107,8 @@ export const action = async ({ request }) => {
               productId,
               productTitle: productTitle || "",
               fileName: f.filename,
-              fileUrl: f.resourceUrl,
+              fileUrl: f.chunkUrls?.length ? null : (f.resourceUrl || null),
+              chunkUrls: f.chunkUrls?.length ? JSON.stringify(f.chunkUrls) : null,
               mimeType: f.mimeType || "application/octet-stream",
               fileSize: f.fileSize != null ? BigInt(f.fileSize) : null,
               displayName: f.displayName || f.filename,
@@ -121,39 +124,59 @@ export const action = async ({ request }) => {
     const saved = records.map((r, i) => ({ fileId: r.id, fileName: files[i].filename }));
     const _shop = session.shop;
 
-    // Background: register all files with Shopify in ONE mutation, poll CDN URLs in
-    // parallel, then write the metafield exactly once when all polling is done.
+    // Background: register all resourceUrls with Shopify Files API, poll CDN URLs,
+    // update DB, then sync metafield once.
     ;(async () => {
       try {
-        // Register all files with Shopify Files API in a single mutation call.
-        const fcRes = await admin.graphql(
-          `#graphql
-          mutation fileCreate($files: [FileCreateInput!]!) {
-            fileCreate(files: $files) {
-              files { id fileStatus ... on GenericFile { url } }
-              userErrors { field message }
+        // Flatten: single files = 1 item, chunked files = N items (one per chunk).
+        const itemsToRegister = [];
+        for (let fi = 0; fi < files.length; fi++) {
+          const f = files[fi];
+          const record = records[fi];
+          if (f.chunkUrls?.length) {
+            for (let ci = 0; ci < f.chunkUrls.length; ci++) {
+              itemsToRegister.push({ resourceUrl: f.chunkUrls[ci], isChunk: true, chunkIndex: ci, fileIndex: fi, record });
             }
-          }`,
-          {
-            variables: {
-              files: files.map((f) => ({
-                alt: f.displayName || f.filename,
-                contentType: "FILE",
-                originalSource: f.resourceUrl,
-              })),
-            },
+          } else if (f.resourceUrl) {
+            itemsToRegister.push({ resourceUrl: f.resourceUrl, isChunk: false, fileIndex: fi, record });
           }
-        );
-        const fcData = await fcRes.json();
-        const shopifyFiles = fcData.data?.fileCreate?.files ?? [];
-        if (fcData.data?.fileCreate?.userErrors?.length || shopifyFiles.length === 0) return;
+        }
+        if (!itemsToRegister.length) return;
 
-        // Poll all files in parallel — each finds its CDN URL independently.
-        // No DB reads inside the poll loop — just write when URL arrives.
-        await Promise.all(
+        // Register with Shopify Files API — batch in groups of 20.
+        const FC_BATCH = 20;
+        const shopifyFiles = [];
+        for (let b = 0; b < itemsToRegister.length; b += FC_BATCH) {
+          const batch = itemsToRegister.slice(b, b + FC_BATCH);
+          const fcRes = await admin.graphql(
+            `#graphql
+            mutation fileCreate($files: [FileCreateInput!]!) {
+              fileCreate(files: $files) {
+                files { id fileStatus ... on GenericFile { url } }
+                userErrors { field message }
+              }
+            }`,
+            {
+              variables: {
+                files: batch.map((item) => ({
+                  alt: item.isChunk
+                    ? `${files[item.fileIndex].displayName || files[item.fileIndex].filename}_chunk_${item.chunkIndex}`
+                    : (files[item.fileIndex].displayName || files[item.fileIndex].filename),
+                  contentType: "FILE",
+                  originalSource: item.resourceUrl,
+                })),
+              },
+            }
+          );
+          const fcData = await fcRes.json();
+          shopifyFiles.push(...(fcData.data?.fileCreate?.files ?? []));
+        }
+        if (!shopifyFiles.length) return;
+
+        // Poll all in parallel — get final CDN URL for each.
+        const finalUrls = await Promise.all(
           shopifyFiles.map(async (sf, i) => {
-            const record = records[i];
-            if (!sf?.id) return;
+            if (!sf?.id) return itemsToRegister[i]?.resourceUrl;
             for (let attempt = 0; attempt < 30; attempt++) {
               await new Promise((r) => setTimeout(r, 2000));
               const pollRes = await admin.graphql(
@@ -161,13 +184,29 @@ export const action = async ({ request }) => {
                 { variables: { id: sf.id } }
               );
               const cdnUrl = (await pollRes.json()).data?.node?.url;
-              if (cdnUrl) {
-                await prisma.productFile.update({ where: { id: record.id }, data: { fileUrl: cdnUrl } });
-                break;
-              }
+              if (cdnUrl) return cdnUrl;
             }
+            return itemsToRegister[i]?.resourceUrl; // fallback
           })
         );
+
+        // Write final URLs back to DB — one update per original file record.
+        for (let fi = 0; fi < files.length; fi++) {
+          const f = files[fi];
+          const record = records[fi];
+          if (f.chunkUrls?.length) {
+            const finalChunkUrls = itemsToRegister
+              .filter((item) => item.fileIndex === fi)
+              .sort((a, b) => a.chunkIndex - b.chunkIndex)
+              .map((item) => finalUrls[itemsToRegister.indexOf(item)]);
+            await prisma.productFile.update({ where: { id: record.id }, data: { chunkUrls: JSON.stringify(finalChunkUrls) } });
+          } else {
+            const idx = itemsToRegister.findIndex((item) => item.fileIndex === fi);
+            if (idx >= 0 && finalUrls[idx]) {
+              await prisma.productFile.update({ where: { id: record.id }, data: { fileUrl: finalUrls[idx] } });
+            }
+          }
+        }
 
         // One single metafield update after all polling is done.
         const allFiles = await prisma.productFile.findMany({
@@ -175,7 +214,11 @@ export const action = async ({ request }) => {
           orderBy: { createdAt: "desc" },
         });
         const value = JSON.stringify(
-          allFiles.map((af) => ({ fileId: af.id, displayName: af.displayName || af.fileName, fileUrl: af.fileUrl }))
+          allFiles.map((af) => ({
+            fileId: af.id,
+            displayName: af.displayName || af.fileName,
+            fileUrl: af.fileUrl || (af.chunkUrls ? JSON.parse(af.chunkUrls)[0] : null),
+          }))
         );
         await admin.graphql(
           `mutation SetFilesMetafield($m: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $m) { metafields { id } userErrors { field message } } }`,

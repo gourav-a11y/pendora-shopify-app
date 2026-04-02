@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useLoaderData, useFetcher, useRevalidator, useRouteError, isRouteErrorResponse } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -156,6 +156,16 @@ const Ic = {
       <path d="M5 3l.5 1.5 1.5.5-1.5.5L5 7l-.5-1.5L3 5l1.5-.5z"/>
     </svg>
   ),
+  menu: (s = 20) => (
+    <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+    </svg>
+  ),
+  close: (s = 20) => (
+    <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+      <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+    </svg>
+  ),
 };
 
 const WIZARD_STEPS = ["Select Product", "Upload Files", "Review & Save"];
@@ -286,6 +296,16 @@ export default function ProductsPage() {
   const [wFiles, setWFiles] = useState([]);
   const [wSubmitting, setWSubmitting] = useState(false);
   const [wError, setWError] = useState(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 768px)");
+    const onChange = (e) => { setIsMobile(e.matches); if (!e.matches) setSidebarOpen(false); };
+    setIsMobile(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
 
   const selected = digitalProducts.find((p) => p.productId === selectedId) || null;
   const isDeleting = deleteFetcher.state !== "idle";
@@ -296,6 +316,7 @@ export default function ProductsPage() {
     setMode("view");
     setUploadError(null);
     setUploadSuccess(null);
+    if (isMobile) setSidebarOpen(false);
   };
 
   const openCreate = () => {
@@ -303,6 +324,7 @@ export default function ProductsPage() {
     setWStep(1);
     setWSearch("");
     setWProduct(null);
+    if (isMobile) setSidebarOpen(false);
     setWFiles([]);
     setWError(null);
   };
@@ -443,15 +465,20 @@ export default function ProductsPage() {
 
   // ── Header bar ─────────────────────────────────────────────────────────────
   const headerBar = (
-    <div style={{ background: t.headerGrad, padding: "14px 24px", display: "flex", justifyContent: "space-between", alignItems: "center", margin: "0 -20px", boxShadow: "0 2px 12px rgba(0,0,0,0.18)" }}>
+    <div style={{ background: t.headerGrad, padding: isMobile ? "10px 14px" : "14px 24px", display: "flex", justifyContent: "space-between", alignItems: "center", margin: "0 -20px", boxShadow: "0 2px 12px rgba(0,0,0,0.18)" }}>
       <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+        {isMobile && (
+          <button onClick={() => setSidebarOpen((v) => !v)} style={{ background: "none", border: "none", color: "#fff", cursor: "pointer", padding: "4px", display: "flex", alignItems: "center" }}>
+            {sidebarOpen ? Ic.close(22) : Ic.menu(22)}
+          </button>
+        )}
         <div style={{ width: 36, height: 36, borderRadius: "10px", background: "rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>
           {Ic.spark(20)}
         </div>
-        <div>
+        {!isMobile && <div>
           <div style={{ color: "#fff", fontWeight: 800, fontSize: "18px", letterSpacing: "-0.3px", lineHeight: 1.1 }}>Pendora</div>
           <div style={{ color: "rgba(255,255,255,0.72)", fontSize: "11px", fontWeight: 400, letterSpacing: "0.4px" }}>DIGITAL PRODUCTS</div>
-        </div>
+        </div>}
       </div>
       <button onClick={() => setIsDark((d) => !d)} style={{ display: "flex", alignItems: "center", gap: "6px", background: "rgba(255,255,255,0.18)", border: "1px solid rgba(255,255,255,0.3)", borderRadius: "20px", padding: "6px 14px", color: "#fff", cursor: "pointer", fontSize: "12px", fontWeight: 600, backdropFilter: "blur(4px)" }}>
         {isDark ? Ic.sun(14) : Ic.moon(14)}
@@ -508,10 +535,15 @@ export default function ProductsPage() {
       <div style={{ background: t.bg, color: t.text, margin: "0 -20px -20px", minHeight: "calc(100vh - 100px)" }}>
         {headerBar}
 
-        <div style={{ display: "flex", minHeight: "calc(100vh - 180px)" }}>
+        <div style={{ display: "flex", minHeight: "calc(100vh - 180px)", position: "relative" }}>
+
+          {/* Sidebar overlay backdrop (mobile) */}
+          {isMobile && sidebarOpen && (
+            <div onClick={() => setSidebarOpen(false)} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 90 }} />
+          )}
 
           {/* ── Left Sidebar ── */}
-          <div style={{ width: "270px", flexShrink: 0, background: t.sidebar, borderRight: `1px solid ${t.sidebarBdr}`, display: "flex", flexDirection: "column" }}>
+          <div style={{ width: isMobile ? "280px" : "270px", flexShrink: 0, background: t.sidebar, borderRight: `1px solid ${t.sidebarBdr}`, display: "flex", flexDirection: "column", ...(isMobile ? { position: "absolute", top: 0, bottom: 0, left: 0, zIndex: 95, transform: sidebarOpen ? "translateX(0)" : "translateX(-100%)", transition: "transform 0.25s ease", boxShadow: sidebarOpen ? "4px 0 20px rgba(0,0,0,0.25)" : "none" } : {}) }}>
             <div style={{ padding: "14px 16px", borderBottom: `1px solid ${t.sidebarBdr}` }}>
               <div style={{ fontSize: "11px", fontWeight: 700, color: t.muted, textTransform: "uppercase", letterSpacing: "0.8px" }}>Your Products</div>
             </div>
@@ -561,15 +593,15 @@ export default function ProductsPage() {
 
             {/* No selection */}
             {mode === "view" && !selected && (
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: "12px", color: t.muted, padding: "60px 20px", textAlign: "center" }}>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: "12px", color: t.muted, padding: isMobile ? "40px 16px" : "60px 20px", textAlign: "center" }}>
                 {Ic.box(36)}
-                <div style={{ fontSize: "14px" }}>Select a product from the sidebar</div>
+                <div style={{ fontSize: "14px" }}>{isMobile ? "Tap the menu icon to select a product" : "Select a product from the sidebar"}</div>
               </div>
             )}
 
             {/* Product Detail */}
             {mode === "view" && selected && (
-              <div style={{ padding: "28px 32px" }}>
+              <div style={{ padding: isMobile ? "16px 12px" : "28px 32px" }}>
 
                 {/* Product Header */}
                 <div style={{ marginBottom: "24px", paddingBottom: "18px", borderBottom: `2px solid ${t.border}`, display: "flex", alignItems: "center", gap: "14px" }}>
@@ -608,7 +640,7 @@ export default function ProductsPage() {
                       <input type="text" value={displayName} disabled={isBusy}
                         onChange={(e) => setDisplayName(e.target.value)}
                         placeholder="e.g. User Guide PDF"
-                        style={{ ...input, width: "280px", opacity: isBusy ? 0.5 : 1 }} />
+                        style={{ ...input, width: isMobile ? "100%" : "280px", maxWidth: "100%", opacity: isBusy ? 0.5 : 1 }} />
                     </div>
                     <div>
                       <button disabled={isBusy} onClick={handleUpload} style={btn("primary", { opacity: isBusy ? 0.6 : 1, borderRadius: "10px" })}>
@@ -634,18 +666,18 @@ export default function ProductsPage() {
                   ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: "0" }}>
                       {selected.files.map((file, idx) => (
-                        <div key={file.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", borderBottom: idx < selected.files.length - 1 ? `1px solid ${t.border}` : "none", opacity: isBusy ? 0.6 : 1, transition: "background 0.12s" }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                        <div key={file.id} style={{ display: "flex", flexDirection: isMobile ? "column" : "row", justifyContent: "space-between", alignItems: isMobile ? "flex-start" : "center", padding: isMobile ? "12px 14px" : "14px 18px", gap: isMobile ? "10px" : "0", borderBottom: idx < selected.files.length - 1 ? `1px solid ${t.border}` : "none", opacity: isBusy ? 0.6 : 1, transition: "background 0.12s" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: "12px", minWidth: 0 }}>
                             <div style={{ width: 38, height: 38, borderRadius: "10px", background: isDark ? "rgba(212,149,10,0.12)" : "rgba(178,197,160,0.25)", display: "flex", alignItems: "center", justifyContent: "center", color: t.accent, flexShrink: 0 }}>
                               {Ic.file(20)}
                             </div>
-                            <div>
-                              <div style={{ fontWeight: 600, fontSize: "14px", color: t.text }}>{file.displayName}</div>
-                              {file.displayName !== file.fileName && <div style={{ fontSize: "11px", color: t.faint }}>{file.fileName}</div>}
+                            <div style={{ minWidth: 0 }}>
+                              <div style={{ fontWeight: 600, fontSize: "14px", color: t.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{file.displayName}</div>
+                              {file.displayName !== file.fileName && <div style={{ fontSize: "11px", color: t.faint, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{file.fileName}</div>}
                               <div style={{ fontSize: "11px", color: t.muted, marginTop: "1px" }}>{file.fileSize} · {new Date(file.createdAt).toLocaleDateString()}</div>
                             </div>
                           </div>
-                          <div style={{ display: "flex", gap: "8px" }}>
+                          <div style={{ display: "flex", gap: "8px", ...(isMobile ? { marginLeft: "50px" } : {}) }}>
                             <a href={`/api/files/${file.id}?token=${file.downloadToken}`} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}>
                               <button disabled={isBusy} style={btn("secondary")}>
                                 {Ic.download(14)} Preview

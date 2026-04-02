@@ -22,18 +22,46 @@ export const loader = async ({ request, params }) => {
       return new Response("File not found.", { status: 404 });
     }
 
-    if (!file.fileUrl) {
+    const hasChunks = file.chunkUrls && typeof file.chunkUrls === "string";
+    if (!hasChunks && !file.fileUrl) {
       return new Response("File URL not available.", { status: 404 });
     }
 
-    // Redirect to Shopify CDN URL — fast, no proxy needed
-    return new Response(null, {
-      status: 302,
-      headers: {
-        Location: file.fileUrl,
-        "Cache-Control": "no-store",
+    // Single file — 302 redirect (fast, as before)
+    if (!hasChunks) {
+      return new Response(null, { status: 302, headers: { Location: file.fileUrl, "Cache-Control": "no-store" } });
+    }
+
+    // Chunked file — stream all chunks sequentially
+    let chunkUrls;
+    try { chunkUrls = JSON.parse(file.chunkUrls); } catch { return new Response("Invalid chunk data.", { status: 500 }); }
+
+    const filename = (file.fileName || "download").replace(/"/g, '\\"');
+    const headers = {
+      "Content-Type": file.mimeType || "application/octet-stream",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "Cache-Control": "no-store",
+    };
+    if (file.fileSize) headers["Content-Length"] = String(file.fileSize);
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          for (const url of chunkUrls) {
+            const res = await fetch(url);
+            if (!res.ok) { controller.error(new Error(`Chunk fetch failed (${res.status})`)); return; }
+            const reader = res.body.getReader();
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              controller.enqueue(value);
+            }
+          }
+          controller.close();
+        } catch (err) { controller.error(err); }
       },
     });
+    return new Response(stream, { status: 200, headers });
   } catch (err) {
     return new Response("Download failed: " + err.message, { status: 500 });
   }

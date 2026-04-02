@@ -22,29 +22,52 @@ export const loader = async ({ params }) => {
     return new Response("Database error.", { status: 500 });
   }
 
-  if (!file?.fileUrl) {
+  const hasChunks = file?.chunkUrls && typeof file.chunkUrls === "string";
+  if (!hasChunks && !file?.fileUrl) {
     return new Response("File not found.", { status: 404 });
   }
 
-  let cdnRes;
-  try {
-    cdnRes = await fetch(file.fileUrl);
-  } catch {
-    return new Response("Failed to reach CDN.", { status: 502 });
-  }
-
-  if (!cdnRes.ok) {
-    return new Response("File unavailable.", { status: 502 });
-  }
-
   const filename = (file.fileName || "download").replace(/"/g, '\\"');
-  const headers = {
-    "Content-Type": file.mimeType || cdnRes.headers.get("content-type") || "application/octet-stream",
+  const baseHeaders = {
+    "Content-Type": file.mimeType || "application/octet-stream",
     "Content-Disposition": `attachment; filename="${filename}"`,
     "Cache-Control": "private, no-store",
   };
-  const contentLength = cdnRes.headers.get("content-length");
-  if (contentLength) headers["Content-Length"] = contentLength;
 
-  return new Response(cdnRes.body, { status: 200, headers });
+  // Chunked file — stream all chunks sequentially
+  if (hasChunks) {
+    let chunkUrls;
+    try { chunkUrls = JSON.parse(file.chunkUrls); } catch { return new Response("Invalid chunk data.", { status: 500 }); }
+    if (file.fileSize) baseHeaders["Content-Length"] = String(file.fileSize);
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          for (const url of chunkUrls) {
+            const res = await fetch(url);
+            if (!res.ok) { controller.error(new Error(`Chunk fetch failed (${res.status})`)); return; }
+            const reader = res.body.getReader();
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              controller.enqueue(value);
+            }
+          }
+          controller.close();
+        } catch (err) { controller.error(err); }
+      },
+    });
+    return new Response(stream, { status: 200, headers: baseHeaders });
+  }
+
+  // Single file — stream from CDN
+  let cdnRes;
+  try { cdnRes = await fetch(file.fileUrl); } catch { return new Response("Failed to reach CDN.", { status: 502 }); }
+  if (!cdnRes.ok) return new Response("File unavailable.", { status: 502 });
+
+  const contentLength = cdnRes.headers.get("content-length");
+  if (contentLength) baseHeaders["Content-Length"] = contentLength;
+  if (cdnRes.headers.get("content-type")) baseHeaders["Content-Type"] = cdnRes.headers.get("content-type");
+
+  return new Response(cdnRes.body, { status: 200, headers: baseHeaders });
 };

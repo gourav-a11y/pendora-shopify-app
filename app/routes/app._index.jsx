@@ -81,6 +81,23 @@ const NIGHT = {
   pill:       'rgba(212,149,10,0.10)',
 };
 
+// ── Upload chunking constants ─────────────────────────────────────────────────
+const CHUNK_SIZE      = 25 * 1024 * 1024;  // 25 MB per chunk
+const CHUNK_THRESHOLD = 50 * 1024 * 1024;  // only chunk files > 50 MB
+const MAX_PARALLEL    = 6;                  // concurrent XHR uploads
+const STAGE_BATCH     = 20;                 // max items per stagedUploadsCreate call
+
+/** Runs up to `limit` async task-factories concurrently, filling slots as each completes. */
+async function withConcurrency(tasks, limit) {
+  const results = new Array(tasks.length);
+  let idx = 0;
+  async function worker() {
+    while (idx < tasks.length) { const i = idx++; results[i] = await tasks[i](); }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
+  return results;
+}
+
 // ── Transition helpers (left-to-right staggered sweep) ────────────────────────
 const TR  = "background 0.38s ease, color 0.35s ease, border-color 0.3s ease, box-shadow 0.38s ease";
 const TRD = "background 0.38s ease 0.12s, color 0.35s ease 0.12s, border-color 0.3s ease 0.12s, box-shadow 0.38s ease 0.12s";
@@ -358,46 +375,108 @@ export default function HomePage() {
     setUploadProgress(0); setUploadSpeedBps(null); setUploadEta(null);
     setUploadError(null); setUploadSuccess(null);
     try {
-      // Use pre-staged target if the cached file matches exactly
-      let target;
-      const cached = prestageRef.current;
-      if (cached && cached.name === file.name && cached.size === file.size) {
-        target = await cached.promise;
-        prestageRef.current = null;
+      const needsChunking = file.size > CHUNK_THRESHOLD;
+      const chunkBytesMap = {};
+      const totalBytes = file.size;
+      let lastSpeedLoaded = 0; let lastSpeedTime = Date.now();
+
+      if (!needsChunking) {
+        // ── Small file: single upload (same as before + header fix) ────────
+        let target;
+        const cached = prestageRef.current;
+        if (cached && cached.name === file.name && cached.size === file.size) { target = await cached.promise; prestageRef.current = null; }
+        if (!target) {
+          const sr = await fetch("/api/stage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent: "stage", files: [{ filename: file.name, mimeType: file.type || "application/octet-stream", fileSize: file.size }] }) });
+          const sd = await sr.json();
+          if (!sr.ok || sd.error) throw new Error(sd.error || "Stage failed.");
+          target = sd.targets[0];
+        }
+        console.log(`[Pendora] Single upload: "${file.name}" (${file.size} bytes)`);
+        await new Promise((res, rej) => {
+          const xhr = new XMLHttpRequest(); xhr.open("PUT", target.url);
+          if (target.parameters?.length) { for (const p of target.parameters) { try { xhr.setRequestHeader(p.name, p.value); } catch {} } }
+          if (!target.parameters?.some(p => p.name.toLowerCase() === "content-type")) { xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream"); }
+          xhr.timeout = 0;
+          xhr.upload.onprogress = (e) => {
+            if (!e.lengthComputable) return;
+            const now = Date.now(); const elapsed = (now - lastSpeedTime) / 1000;
+            setUploadProgress(Math.round((e.loaded / e.total) * 100));
+            if (elapsed >= 0.8) {
+              const speed = (e.loaded - lastSpeedLoaded) / elapsed;
+              setUploadSpeedBps(speed > 0 ? speed : null);
+              setUploadEta(speed > 0 ? (e.total - e.loaded) / speed : null);
+              lastSpeedLoaded = e.loaded; lastSpeedTime = now;
+            }
+          };
+          xhr.onerror = () => rej(new Error("Network error.")); xhr.onabort = () => rej(new Error("Upload cancelled."));
+          xhr.onload = () => { if (xhr.status < 300) { console.log(`[Pendora] Single upload OK: "${file.name}"`); res(); } else rej(new Error(`HTTP ${xhr.status}`)); };
+          xhr.send(file);
+        });
+        setUploadProgress(100);
+        const svr = await fetch("/api/stage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent: "save", files: [{ resourceUrl: target.resourceUrl, filename: file.name, mimeType: file.type || "application/octet-stream", fileSize: file.size, displayName: displayName || file.name }], productId: selected.productId, productTitle: selected.productTitle, downloadEnabled: true }) });
+        const svd = await svr.json();
+        if (!svr.ok || svd.error) throw new Error(svd.error || "Save failed.");
+      } else {
+        // ── Large file: chunked parallel upload ───────────────────────────
+        const numChunks = Math.ceil(file.size / CHUNK_SIZE);
+        const parts = Array.from({ length: numChunks }, (_, ci) => ({
+          chunkIndex: ci, start: ci * CHUNK_SIZE, end: Math.min((ci + 1) * CHUNK_SIZE, file.size),
+        }));
+        console.log(`[Pendora] Chunked upload: "${file.name}" → ${parts.length} parts`);
+
+        // Stage in batches
+        const ext = file.name.includes(".") ? file.name.substring(file.name.lastIndexOf(".")) : "";
+        const base = file.name.includes(".") ? file.name.substring(0, file.name.lastIndexOf(".")) : file.name;
+        const stageParts = parts.map((p) => ({ filename: `${base}_chunk${p.chunkIndex}${ext}`, mimeType: "application/octet-stream", fileSize: p.end - p.start }));
+        const allTargets = [];
+        for (let b = 0; b < stageParts.length; b += STAGE_BATCH) {
+          const batch = stageParts.slice(b, b + STAGE_BATCH);
+          const sr = await fetch("/api/stage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent: "stage", files: batch }) });
+          const sd = await sr.json();
+          if (!sr.ok || sd.error) throw new Error(sd.error || "Stage failed.");
+          allTargets.push(...sd.targets);
+        }
+
+        // Upload with concurrency + progress
+        const uploadTasks = parts.map((part, i) => async () => {
+          const target = allTargets[i];
+          const blob = file.slice(part.start, part.end);
+          await new Promise((res, rej) => {
+            const xhr = new XMLHttpRequest(); xhr.open("PUT", target.url);
+            if (target.parameters?.length) { for (const p of target.parameters) { try { xhr.setRequestHeader(p.name, p.value); } catch {} } }
+            if (!target.parameters?.some(p => p.name.toLowerCase() === "content-type")) { xhr.setRequestHeader("Content-Type", "application/octet-stream"); }
+            xhr.timeout = 0;
+            xhr.upload.onprogress = (e) => {
+              if (!e.lengthComputable) return;
+              chunkBytesMap[i] = e.loaded;
+              const loaded = Object.values(chunkBytesMap).reduce((a, b) => a + b, 0);
+              setUploadProgress(Math.round((loaded / totalBytes) * 100));
+              const now = Date.now(); const elapsed = (now - lastSpeedTime) / 1000;
+              if (elapsed >= 0.8) {
+                const speed = (loaded - lastSpeedLoaded) / elapsed;
+                setUploadSpeedBps(speed > 0 ? speed : null);
+                setUploadEta(speed > 0 ? (totalBytes - loaded) / speed : null);
+                lastSpeedLoaded = loaded; lastSpeedTime = now;
+              }
+            };
+            xhr.onerror = () => rej(new Error(`Network error: part ${i}`));
+            xhr.onabort = () => rej(new Error("Upload cancelled."));
+            xhr.onload = () => { if (xhr.status < 300) { console.log(`[Pendora] Part ${i + 1}/${parts.length} OK`); res(); } else rej(new Error(`HTTP ${xhr.status}: part ${i}`)); };
+            xhr.send(blob);
+          });
+          return target.resourceUrl;
+        });
+        const resourceUrls = await withConcurrency(uploadTasks, MAX_PARALLEL);
+        setUploadProgress(100);
+        console.log(`[Pendora] All ${resourceUrls.length} parts uploaded`);
+
+        const svr = await fetch("/api/stage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent: "save", files: [{ chunkUrls: resourceUrls, filename: file.name, mimeType: file.type || "application/octet-stream", fileSize: file.size, displayName: displayName || file.name }], productId: selected.productId, productTitle: selected.productTitle, downloadEnabled: true }) });
+        const svd = await svr.json();
+        if (!svr.ok || svd.error) throw new Error(svd.error || "Save failed.");
       }
-      if (!target) {
-        const sr = await fetch("/api/stage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent: "stage", files: [{ filename: file.name, mimeType: file.type || "application/octet-stream", fileSize: file.size }] }) });
-        const sd = await sr.json();
-        if (!sr.ok || sd.error) throw new Error(sd.error || "Stage failed.");
-        target = sd.targets[0];
-      }
-      await new Promise((res, rej) => {
-        const xhr = new XMLHttpRequest(); xhr.open("PUT", target.url);
-        xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
-        xhr.timeout = 0;
-        // ── Progress tracking ──────────────────────────────────────────────
-        let lastLoaded = 0; let lastTime = Date.now();
-        xhr.upload.onprogress = (e) => {
-          if (!e.lengthComputable) return;
-          const now = Date.now(); const elapsed = (now - lastTime) / 1000;
-          setUploadProgress(Math.round((e.loaded / e.total) * 100));
-          if (elapsed >= 0.8) {
-            const speed = (e.loaded - lastLoaded) / elapsed;
-            setUploadSpeedBps(speed > 0 ? speed : null);
-            setUploadEta(speed > 0 ? (e.total - e.loaded) / speed : null);
-            lastLoaded = e.loaded; lastTime = now;
-          }
-        };
-        xhr.onerror = () => rej(new Error("Network error.")); xhr.onabort = () => rej(new Error("Upload cancelled."));
-        xhr.onload = () => xhr.status < 300 ? res() : rej(new Error(`HTTP ${xhr.status}`)); xhr.send(file);
-      });
-      setUploadProgress(100);
-      const svr = await fetch("/api/stage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent: "save", files: [{ resourceUrl: target.resourceUrl, filename: file.name, mimeType: file.type || "application/octet-stream", fileSize: file.size, displayName: displayName || file.name }], productId: selected.productId, productTitle: selected.productTitle, downloadEnabled: true }) });
-      const svd = await svr.json();
-      if (!svr.ok || svd.error) throw new Error(svd.error || "Save failed.");
       if (fileInputRef.current) fileInputRef.current.value = "";
       setDisplayName(""); setUploadSuccess(`"${file.name}" uploaded successfully.`); revalidate();
-    } catch (err) { setUploadError(err.message); }
+    } catch (err) { console.error("[Pendora] Upload error:", err.message); setUploadError(err.message); }
     finally { setIsUploading(false); setUploadingProductId(null); setUploadProgress(0); setUploadSpeedBps(null); setUploadEta(null); }
   };
 
@@ -450,40 +529,97 @@ export default function HomePage() {
     setWSubmitting(true); setWError(null);
     setIsUploading(true); setUploadingProductId(wProduct.id);
     try {
-      // Use pre-staged targets if the wizard files haven't changed since Step 3 loaded.
-      // If the user is still reviewing (5-15 seconds), this promise is already resolved.
-      let stagedTargets;
+      // ── 1. Build chunk plan ─────────────────────────────────────────────
+      const fileChunks = wFiles.map((file) => {
+        if (file.size > CHUNK_THRESHOLD) {
+          const n = Math.ceil(file.size / CHUNK_SIZE);
+          return Array.from({ length: n }, (_, ci) => ({
+            file, chunkIndex: ci, isChunk: true,
+            start: ci * CHUNK_SIZE, end: Math.min((ci + 1) * CHUNK_SIZE, file.size),
+          }));
+        }
+        return [{ file, chunkIndex: 0, isChunk: false, start: 0, end: file.size }];
+      });
+      const allParts = fileChunks.flat();
+      console.log(`[Pendora] Wizard: ${allParts.length} parts from ${wFiles.length} file(s), chunked=${allParts.some(p => p.isChunk)}`);
+
+      // ── 2. Stage presigned URLs (batched) ───────────────────────────────
+      const allStageParts = allParts.map(({ file, chunkIndex, isChunk, start, end }) => {
+        const ext = file.name.includes(".") ? file.name.substring(file.name.lastIndexOf(".")) : "";
+        const base = file.name.includes(".") ? file.name.substring(0, file.name.lastIndexOf(".")) : file.name;
+        return {
+          filename: isChunk ? `${base}_chunk${chunkIndex}${ext}` : file.name,
+          mimeType: isChunk ? "application/octet-stream" : (file.type || "application/octet-stream"),
+          fileSize: end - start,
+        };
+      });
+
+      // Use pre-staged targets ONLY for non-chunked single-file uploads
+      let allTargets = [];
       const pre = wPrestageRef.current;
-      if (pre && pre.files.length === wFiles.length &&
+      if (!allParts.some(p => p.isChunk) && pre && pre.files.length === wFiles.length &&
           pre.files.every((pf, i) => pf.name === wFiles[i].name && pf.size === wFiles[i].size)) {
-        stagedTargets = await pre.promise;
+        const cached = await pre.promise;
+        if (cached) allTargets = cached;
         wPrestageRef.current = null;
       }
-      if (!stagedTargets) {
-        const sr = await fetch("/api/stage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent: "stage", files: wFiles.map((f) => ({ filename: f.name, mimeType: f.type || "application/octet-stream", fileSize: f.size })) }) });
-        const sd = await sr.json();
-        if (!sr.ok || sd.error) throw new Error(sd.error || "Stage failed.");
-        stagedTargets = sd.targets;
+      if (!allTargets.length) {
+        for (let b = 0; b < allStageParts.length; b += STAGE_BATCH) {
+          const batch = allStageParts.slice(b, b + STAGE_BATCH);
+          const sr = await fetch("/api/stage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent: "stage", files: batch }) });
+          const sd = await sr.json();
+          if (!sr.ok || sd.error) throw new Error(sd.error || "Stage failed.");
+          allTargets.push(...sd.targets);
+        }
       }
-      // Upload all files to Shopify CDN in parallel — each XHR runs concurrently.
-      const uploaded = await Promise.all(
-        wFiles.map(async (file, i) => {
-          const target = stagedTargets[i];
-          await new Promise((res, rej) => {
-            const xhr = new XMLHttpRequest(); xhr.open("PUT", target.url);
-            xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
-            xhr.timeout = 0; // no timeout — large files
-            xhr.onerror = () => rej(new Error(`Network error: "${file.name}"`)); xhr.onabort = () => rej(new Error(`Cancelled: "${file.name}"`));
-            xhr.onload = () => xhr.status < 300 ? res() : rej(new Error(`HTTP ${xhr.status}: "${file.name}"`)); xhr.send(file);
-          });
-          return { resourceUrl: target.resourceUrl, filename: file.name, mimeType: file.type || "application/octet-stream", fileSize: file.size, displayName: file.name };
-        })
-      );
+      console.log(`[Pendora] Wizard: staged ${allTargets.length} targets`);
+
+      // ── 3. Upload with concurrency pool ─────────────────────────────────
+      const uploadTasks = allParts.map((part, i) => async () => {
+        const { file, isChunk, start, end } = part;
+        const target = allTargets[i];
+        const blob = isChunk ? file.slice(start, end) : file;
+
+        await new Promise((res, rej) => {
+          const xhr = new XMLHttpRequest(); xhr.open("PUT", target.url);
+          if (target.parameters?.length) {
+            for (const p of target.parameters) { try { xhr.setRequestHeader(p.name, p.value); } catch {} }
+          }
+          if (!target.parameters?.some(p => p.name.toLowerCase() === "content-type")) {
+            xhr.setRequestHeader("Content-Type", isChunk ? "application/octet-stream" : (file.type || "application/octet-stream"));
+          }
+          xhr.timeout = 0;
+          xhr.onerror = () => rej(new Error(`Network error: "${file.name}" part ${i}`));
+          xhr.onabort = () => rej(new Error(`Cancelled: "${file.name}"`));
+          xhr.onload = () => {
+            if (xhr.status < 300) { console.log(`[Pendora] Part ${i + 1}/${allParts.length} OK (${file.name})`); res(); }
+            else rej(new Error(`HTTP ${xhr.status}: "${file.name}" part ${i}`));
+          };
+          xhr.send(blob);
+        });
+        return target.resourceUrl;
+      });
+      const resourceUrls = await withConcurrency(uploadTasks, MAX_PARALLEL);
+      console.log(`[Pendora] Wizard: all ${resourceUrls.length} parts uploaded`);
+
+      // ── 4. Build save payload ───────────────────────────────────────────
+      let partIdx = 0;
+      const uploaded = wFiles.map((file, fi) => {
+        const chunks = fileChunks[fi];
+        if (chunks[0].isChunk) {
+          const chunkUrls = chunks.map(() => resourceUrls[partIdx++]);
+          return { chunkUrls, filename: file.name, mimeType: file.type || "application/octet-stream", fileSize: file.size, displayName: file.name };
+        }
+        return { resourceUrl: resourceUrls[partIdx++], filename: file.name, mimeType: file.type || "application/octet-stream", fileSize: file.size, displayName: file.name };
+      });
+
+      // ── 5. Save ─────────────────────────────────────────────────────────
       const svr = await fetch("/api/stage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent: "save", files: uploaded, productId: wProduct.id, productTitle: wProduct.title, downloadEnabled: true }) });
       const svd = await svr.json();
       if (!svr.ok || svd.error) throw new Error(svd.error || "Save failed.");
+      console.log("[Pendora] Wizard: save OK");
       setSelectedId(wProduct.id); setMode("view"); revalidate();
-    } catch (err) { setWError(err.message); }
+    } catch (err) { console.error("[Pendora] Wizard error:", err.message); setWError(err.message); }
     finally { setWSubmitting(false); setIsUploading(false); setUploadingProductId(null); }
   };
 
@@ -610,6 +746,7 @@ export default function HomePage() {
                 );
               })}
         </div>
+        <div style={{ padding: "8px 16px", borderTop: `1px solid ${t.sidebarBdr}`, fontSize: "10px", color: t.faint, textAlign: "center", flexShrink: 0 }}>⚡ v3-full-chunked</div>
       </div>
 
       {/* Right panel */}

@@ -39,7 +39,8 @@ model ProductFile {
   productId    String
   productTitle String?
   fileName     String
-  fileUrl      String
+  fileUrl      String?
+  chunkUrls    String?
   mimeType     String?
   fileSize     BigInt?
   displayName     String?
