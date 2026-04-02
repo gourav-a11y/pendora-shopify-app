@@ -290,7 +290,10 @@ export default function HomePage() {
   const [wSubmitting, setWSubmitting] = useState(false);
   const [wError, setWError] = useState(null);
   const [wCanRetry, setWCanRetry] = useState(false);       // show Retry button instead of Create
-  const wDonePartsRef = useRef({});                          // { [partIndex]: resourceUrl } — survives retries
+  const [wProgressText, setWProgressText] = useState("");   // "0%" → "33%" → "100%"
+  const wDonePartsRef = useRef({});
+  const wChunkBytesRef = useRef({});                         // { [partIndex]: bytesLoaded } — smooth progress
+  const wTotalBytesRef = useRef(0);                          // { [partIndex]: resourceUrl } — survives retries
 
   // Optimistic delete — IDs removed from UI instantly, no revalidate needed
   const [deletedFileIds, setDeletedFileIds] = useState(new Set());
@@ -523,7 +526,7 @@ export default function HomePage() {
 
   const handleWizardSubmit = async () => {
     if (wSubmitting || !wProduct || !wFiles.length) return;
-    setWSubmitting(true); setWError(null); setWCanRetry(false);
+    setWSubmitting(true); setWError(null); setWCanRetry(false); setWProgressText("0%");
     setIsUploading(true); setUploadingProductId(wProduct.id);
     try {
       // ── 1. Build chunk plan ─────────────────────────────────────────────
@@ -538,6 +541,12 @@ export default function HomePage() {
         return [{ file, chunkIndex: 0, isChunk: false, start: 0, end: file.size }];
       });
       const allParts = fileChunks.flat();
+      wTotalBytesRef.current = allParts.reduce((sum, p) => sum + (p.end - p.start), 0);
+      wChunkBytesRef.current = {};
+      // Pre-fill done parts' bytes so progress starts from resume point
+      for (const [idx, _] of Object.entries(wDonePartsRef.current)) {
+        const p = allParts[idx]; if (p) wChunkBytesRef.current[idx] = p.end - p.start;
+      }
       const doneCount = Object.keys(wDonePartsRef.current).length;
       console.log(`[Pendora] Wizard: ${allParts.length} parts, ${doneCount} already done (resume), chunked=${allParts.some(p => p.isChunk)}`);
 
@@ -571,14 +580,21 @@ export default function HomePage() {
               if (target.parameters?.length) { for (const p of target.parameters) { try { xhr.setRequestHeader(p.name, p.value); } catch {} } }
               if (!target.parameters?.some(p => p.name.toLowerCase() === "content-type")) { xhr.setRequestHeader("Content-Type", stageMeta.mimeType); }
               xhr.timeout = 0;
+              xhr.upload.onprogress = (e) => {
+                if (!e.lengthComputable || !wTotalBytesRef.current) return;
+                wChunkBytesRef.current[partIndex] = e.loaded;
+                const loaded = Object.values(wChunkBytesRef.current).reduce((a, b) => a + b, 0);
+                setWProgressText(`${Math.min(Math.round((loaded / wTotalBytesRef.current) * 100), 99)}%`);
+              };
               xhr.onerror = () => rej(new Error("Network error"));
               xhr.onabort = () => rej(new Error("Cancelled"));
               xhr.onload = () => xhr.status < 300 ? res() : rej(new Error(`HTTP ${xhr.status}`));
               xhr.send(blob);
             });
 
-            // Success — cache and return
+            // Success — cache, update progress, return
             wDonePartsRef.current[partIndex] = target.resourceUrl;
+            wChunkBytesRef.current[partIndex] = end - start; // mark full size for completed chunk
             console.log(`[Pendora] Part ${partIndex + 1}/${allParts.length} OK (attempt ${attempt})`);
             return target.resourceUrl;
           } catch (err) {
@@ -593,6 +609,7 @@ export default function HomePage() {
       const uploadTasks = allParts.map((part, i) => () => stageAndUploadPart(part, i));
       await withConcurrency(uploadTasks, MAX_PARALLEL);
       const resourceUrls = allParts.map((_, i) => wDonePartsRef.current[i]);
+      setWProgressText("100%");
       console.log(`[Pendora] Wizard: all ${resourceUrls.length} parts uploaded`);
 
       // ── 4. Build save payload ───────────────────────────────────────────
@@ -619,7 +636,7 @@ export default function HomePage() {
       setWError(`${err.message} (${doneCount} parts uploaded successfully)`);
       setWCanRetry(doneCount > 0); // show Retry button if some parts succeeded
     }
-    finally { setWSubmitting(false); setIsUploading(false); setUploadingProductId(null); }
+    finally { setWSubmitting(false); setIsUploading(false); setUploadingProductId(null); setWProgressText(""); }
   };
 
   // Build shopifyProducts from the lazy-fetched /api/products data.
@@ -745,7 +762,7 @@ export default function HomePage() {
                 );
               })}
         </div>
-        <div style={{ padding: "8px 16px", borderTop: `1px solid ${t.sidebarBdr}`, fontSize: "10px", color: t.faint, textAlign: "center", flexShrink: 0 }}>⚡ v4-jit-retry</div>
+        <div style={{ padding: "8px 16px", borderTop: `1px solid ${t.sidebarBdr}`, fontSize: "10px", color: t.faint, textAlign: "center", flexShrink: 0 }}>⚡ v5-progress</div>
       </div>
 
       {/* Right panel */}
@@ -756,7 +773,7 @@ export default function HomePage() {
             <Wizard B={B} inp={inp} Ic={Ic} t={t} isDark={isDark}
               step={wStep} setStep={setWStep} search={wSearch} setSearch={setWSearch}
               wProduct={wProduct} setWProduct={setWProduct} wFiles={wFiles} setWFiles={setWFiles}
-              wSubmitting={wSubmitting} wError={wError} wCanRetry={wCanRetry} wDonePartsRef={wDonePartsRef}
+              wSubmitting={wSubmitting} wError={wError} wCanRetry={wCanRetry} wDonePartsRef={wDonePartsRef} wProgressText={wProgressText}
               filteredShopify={filteredShopify} shopifyLoading={shopifyLoading}
               wizardFileInputRef={wizardFileInputRef} wizardPickFiles={wizardPickFiles}
               handleWizardSubmit={handleWizardSubmit} onCancel={() => setMode("view")} />
@@ -946,7 +963,7 @@ export default function HomePage() {
 
 // ─── Wizard ───────────────────────────────────────────────────────────────────
 
-function Wizard({ inp, Ic, t, step, setStep, search, setSearch, wProduct, setWProduct, wFiles, setWFiles, wSubmitting, wError, wCanRetry, wDonePartsRef, filteredShopify, shopifyLoading, wizardFileInputRef, wizardPickFiles, handleWizardSubmit, onCancel }) {
+function Wizard({ inp, Ic, t, step, setStep, search, setSearch, wProduct, setWProduct, wFiles, setWFiles, wSubmitting, wError, wCanRetry, wDonePartsRef, wProgressText, filteredShopify, shopifyLoading, wizardFileInputRef, wizardPickFiles, handleWizardSubmit, onCancel }) {
   const btnSecondary = { padding: "11px 24px", borderRadius: "10px", fontWeight: 700, fontSize: "14px", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "8px", background: t.surface, border: `1.5px solid ${t.border}`, color: t.text, transition: "opacity 0.15s" };
   const btnPrimary   = { padding: "11px 28px", borderRadius: "10px", fontWeight: 700, fontSize: "14px", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "8px", border: "none", background: t.active, color: "#fff", transition: "opacity 0.15s" };
 
@@ -1090,8 +1107,9 @@ function Wizard({ inp, Ic, t, step, setStep, search, setSearch, wProduct, setWPr
               <div style={{ fontSize: "13px", color: t.muted }}>Confirm the details below and save your digital product.</div>
             </div>
             {wSubmitting && (
-              <div style={{ padding: "13px 18px", background: t.pill, border: `1px solid ${t.active}`, borderRadius: "11px", color: t.active, fontWeight: 600, fontSize: "14px", display: "flex", alignItems: "center", gap: "10px", marginBottom: "16px" }}>
-                ⏳ Uploading & saving…
+              <div style={{ padding: "13px 18px", background: t.pill, border: `1px solid ${t.active}`, borderRadius: "11px", color: t.active, fontWeight: 600, fontSize: "14px", display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
+                <span>⏳ Uploading & saving…</span>
+                {wProgressText && <span style={{ fontWeight: 800, fontSize: "15px" }}>{wProgressText}</span>}
               </div>
             )}
             <div style={{ background: t.surface, border: `1px solid ${t.border}`, borderRadius: "14px", padding: "22px 24px", marginBottom: "16px", opacity: wSubmitting ? 0.6 : 1 }}>
