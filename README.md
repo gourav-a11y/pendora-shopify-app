@@ -49,6 +49,10 @@ The app uses a **Shopify Checkout UI Extension** on `purchase.thank-you.block.re
 - **No Login Required** — Customers click and download — no account needed.
 
 ### Technical
+- **Chunked Parallel Uploads** — Files over 50 MB are automatically split into 25 MB chunks and uploaded via 6 concurrent connections, achieving up to 6x faster upload speeds. Files up to 5 GB are supported.
+- **Just-in-Time Staging** — Each chunk gets a fresh pre-signed URL immediately before upload, preventing URL expiry on large files.
+- **Auto-Retry** — Failed chunks are automatically retried up to 3 times with exponential backoff. If retries exhaust, a "Retry Upload" button lets merchants resume from where they left off.
+- **Chunked Downloads** — Large files stored as chunks are streamed back to customers seamlessly via `ReadableStream` concatenation — no reassembly needed.
 - **Shopify Staged Uploads** — Files are uploaded directly to Shopify's CDN via pre-signed PUT URLs; the app server never handles raw file bytes.
 - **Metafield Sync** — File metadata is synced to `pendora.files` product metafields after every upload or delete, keeping the checkout extension up to date without any HTTP calls at render time.
 - **Webhook Handling** — Listens to `app/uninstalled` and `app/scopes_update` webhooks for clean lifecycle management.
@@ -194,11 +198,11 @@ Response:
 }
 ```
 
-The client then PUTs the file bytes to `target.url` directly.
+The client then PUTs the file bytes to `target.url` directly. For large files (>50 MB), the client splits the file into 25 MB chunks and stages/uploads each chunk independently with just-in-time URL generation.
 
 **Phase 2 — Save** (`intent: "save"`)
 
-After the PUT completes, save the file record and sync metafields.
+After all uploads complete, save the file record and sync metafields.
 
 ```json
 {
@@ -217,17 +221,34 @@ After the PUT completes, save the file record and sync metafields.
 }
 ```
 
+For chunked files, `resourceUrl` is replaced by `chunkUrls`:
+
+```json
+{
+  "intent": "save",
+  "files": [
+    {
+      "chunkUrls": ["https://cdn.shopify.com/chunk0...", "https://cdn.shopify.com/chunk1..."],
+      "filename": "video.mp4",
+      "mimeType": "video/mp4",
+      "fileSize": 2147483648,
+      "displayName": "Course Video"
+    }
+  ]
+}
+```
+
 ---
 
 ### `GET /api/files/:fileId?token=<token>`
 
-Merchant-facing file preview. Requires a valid signed download token (generated server-side on each dashboard load). Token expires in **1 hour**.
+Merchant-facing file preview. Requires a valid signed download token (generated server-side on each dashboard load). Token expires in **1 hour**. For chunked files, streams all chunks sequentially via `ReadableStream` instead of redirecting.
 
 ---
 
 ### `GET /apps/pendora/api/download/:fileId` *(App Proxy)*
 
-Customer-facing download endpoint. Routed through the Shopify App Proxy — Shopify verifies the request HMAC before forwarding to the app. Used by the Thank You page extension.
+Customer-facing download endpoint. Routed through the Shopify App Proxy — Shopify verifies the request HMAC before forwarding to the app. Used by the Thank You page extension. Supports both single-URL and chunked files transparently.
 
 ---
 
@@ -247,15 +268,17 @@ model ProductFile {
   productId       String            // Shopify Product GID
   productTitle    String?
   fileName        String            // original filename
-  fileUrl         String            // Shopify CDN URL
+  fileUrl         String?           // Shopify CDN URL (null for chunked uploads)
+  chunkUrls       String?           // JSON array of CDN URLs for chunked files
   mimeType        String?
-  fileSize        Int?              // bytes
+  fileSize        BigInt?           // bytes (BigInt for files > 2 GB)
   displayName     String?           // customer-facing label
   downloadEnabled Boolean  @default(true)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   @@index([shop, productId])
+  @@index([shop, createdAt])
 }
 ```
 
