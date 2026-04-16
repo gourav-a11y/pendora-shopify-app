@@ -1,6 +1,10 @@
 import crypto from "crypto";
 
-const getSecret = () => process.env.SHOPIFY_API_SECRET || "dev-secret-key";
+const getSecret = () => {
+  const s = process.env.SHOPIFY_API_SECRET;
+  if (!s) throw new Error("SHOPIFY_API_SECRET environment variable is required");
+  return s;
+};
 
 /**
  * Generate a signed download token for a file.
@@ -8,6 +12,17 @@ const getSecret = () => process.env.SHOPIFY_API_SECRET || "dev-secret-key";
  */
 export function generateDownloadToken(fileId) {
   const exp = Math.floor(Date.now() / 1000) + 3600;
+  const payload = Buffer.from(JSON.stringify({ fileId, exp })).toString("base64url");
+  const sig = crypto.createHmac("sha256", getSecret()).update(payload).digest("hex");
+  return `${payload}.${sig}`;
+}
+
+/**
+ * Generate a long-lived download token for email links.
+ * Token expires in 7 days.
+ */
+export function generateEmailDownloadToken(fileId) {
+  const exp = Math.floor(Date.now() / 1000) + 7 * 24 * 3600;
   const payload = Buffer.from(JSON.stringify({ fileId, exp })).toString("base64url");
   const sig = crypto.createHmac("sha256", getSecret()).update(payload).digest("hex");
   return `${payload}.${sig}`;

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { useLoaderData, useFetcher, useRevalidator, useRouteError, isRouteErrorResponse } from "react-router";
+import { useLoaderData, useFetcher, useRevalidator, useNavigate, useRouteError, isRouteErrorResponse } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -14,78 +14,69 @@ function formatFileSize(bytes) {
   return (n / (1024 * 1024 * 1024)).toFixed(2) + " GB";
 }
 
-// ── Day: Serene Nature Tones  |  Night: Black & Gold Elegance ─────────────────
-// Solid colors only — no gradients.
+function getFileType(filename) {
+  if (!filename) return "—";
+  const ext = filename.split(".").pop();
+  return ext && ext !== filename ? ext.toUpperCase() : "—";
+}
+
+// ── Shopify-matched: Light Steel grays + Navy/Amber accents ───────────────────
 const DAY = {
-  headerBg:   '#567870',
-  bg:         '#f2f8f5',
-  sidebar:    '#e2eeea',
-  sidebarBdr: '#c4d8d0',
-  surface:    '#d8eae4',
-  border:     '#b4ccc4',
-  accent:     '#6a9e8c',
-  accentText: '#ffffff',
-  active:     '#567870',
-  activeBg:   '#ccddd8',
-  activeBdr:  '#567870',
-  text:       '#1c3028',
-  muted:      '#527060',
-  faint:      '#88aaa0',
-  danger:     '#8b2e20',
-  dangerBg:   '#fce8e6',
-  dangerBdr:  '#d89090',
-  success:    '#2e7050',
-  successBg:  '#e6f5ec',
-  successBdr: '#80c098',
-  badgeBg:    '#c4e0d8',
-  badgeBdr:   '#9cc4b8',
-  badgeText:  '#1e4838',
-  stepDone:   '#6a9e8c',
-  stepActive: '#567870',
-  stepLine:   '#c4d8d0',
-  inputBdr:   '#b4ccc4',
-  inputBg:    '#f2f8f5',
-  shadow:     '0 1px 6px rgba(40,80,64,0.10)',
-  pill:       'rgba(106,158,140,0.15)',
-};
-const NIGHT = {
-  headerBg:   '#111828',
-  bg:         '#0a0a0a',
-  sidebar:    '#111828',
-  sidebarBdr: '#1f2a40',
-  surface:    '#151d2e',
-  border:     '#243050',
-  accent:     '#d4950a',
-  accentText: '#0a0a0a',
-  active:     '#d4950a',
-  activeBg:   '#1a1608',
-  activeBdr:  '#d4950a',
-  text:       '#f0f0f0',
-  muted:      '#788899',
-  faint:      '#3a4a60',
-  danger:     '#e05040',
-  dangerBg:   '#1a0e0e',
-  dangerBdr:  '#6a2020',
-  success:    '#3a9060',
-  successBg:  '#0e1a12',
-  successBdr: '#2a5a38',
-  badgeBg:    '#1f2a3f',
-  badgeBdr:   '#2a3a55',
-  badgeText:  '#8898bb',
-  stepDone:   '#d4950a',
-  stepActive: '#d4950a',
-  stepLine:   '#243050',
-  inputBdr:   '#243050',
-  inputBg:    '#0f1520',
-  shadow:     '0 2px 10px rgba(0,0,0,0.45)',
-  pill:       'rgba(212,149,10,0.10)',
+  headerBg:   '#1B2B44',
+  bg:         '#F6F6F7',
+  sidebar:    '#FFFFFF',
+  sidebarBdr: '#E1E3E5',
+  surface:    '#FFFFFF',
+  border:     '#E1E3E5',
+  accent:     '#F5A524',
+  accentText: '#FFFFFF',
+  active:     '#1B2B44',
+  activeBg:   '#F0F1F2',
+  activeBdr:  '#1B2B44',
+  text:       '#303030',
+  muted:      '#6D7175',
+  faint:      '#999EA3',
+  danger:     '#D72C0D',
+  dangerBg:   '#FFF4F4',
+  dangerBdr:  '#FDBDBD',
+  success:    '#008060',
+  successBg:  '#F1F8F5',
+  successBdr: '#AEE9D1',
+  badgeBg:    '#E4E5E7',
+  badgeBdr:   '#C9CCCF',
+  badgeText:  '#6D7175',
+  stepDone:   '#1B2B44',
+  stepActive: '#F5A524',
+  stepLine:   '#E1E3E5',
+  inputBdr:   '#C9CCCF',
+  inputBg:    '#FFFFFF',
+  shadow:     '0 1px 2px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.04)',
+  pill:       'rgba(27,43,68,0.07)',
 };
 
 // ── Upload chunking constants ─────────────────────────────────────────────────
 const CHUNK_SIZE      = 25 * 1024 * 1024;  // 25 MB per chunk
 const CHUNK_THRESHOLD = 50 * 1024 * 1024;  // only chunk files > 50 MB
 const MAX_PARALLEL    = 6;                  // concurrent XHR uploads
-const STAGE_BATCH     = 20;                 // max items per stagedUploadsCreate call
+
+// ── Resume cache helpers (localStorage) ───────────────────────────────────────
+const RESUME_MAX_AGE = 60 * 60 * 1000; // 60 minutes
+
+function resumeCacheKey(productId, files) {
+  return `pendora_upload_${productId}_${files.map(f => f.name + f.size).join("|")}`;
+}
+function loadResumeCache(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (Date.now() - data.ts > RESUME_MAX_AGE) { localStorage.removeItem(key); return null; }
+    return data.done || null;
+  } catch { return null; }
+}
+function saveResumeCache(key, files, done) {
+  try { localStorage.setItem(key, JSON.stringify({ ts: Date.now(), files: files.map(f => ({ name: f.name, size: f.size })), done })); } catch {}
+}
 
 /** Runs up to `limit` async task-factories concurrently, filling slots as each completes. */
 async function withConcurrency(tasks, limit) {
@@ -190,7 +181,7 @@ export const loader = async ({ request }) => {
     if (!productMap[f.productId]) {
       productMap[f.productId] = { productId: f.productId, productTitle: f.productTitle || "Unknown Product", files: [] };
     }
-    productMap[f.productId].files.push({ id: f.id, fileName: f.fileName, displayName: f.displayName || f.fileName, fileSize: formatFileSize(f.fileSize), createdAt: f.createdAt.toISOString(), downloadToken: generateDownloadToken(f.id) });
+    productMap[f.productId].files.push({ id: f.id, fileName: f.fileName, displayName: f.displayName || f.fileName, fileSize: formatFileSize(f.fileSize), status: f.status || "ready", createdAt: f.createdAt.toISOString(), downloadToken: generateDownloadToken(f.id) });
   }
 
   // Fire-and-forget metafield sync so checkout extension stays up to date.
@@ -265,9 +256,10 @@ export default function HomePage() {
   const productDeleteFetcher = useFetcher();
   const shopifyFetcher = useFetcher(); // lazy-loads /api/products only when wizard opens
   const { revalidate, state: revalidateState } = useRevalidator();
+  const navigate = useNavigate();
+  const pendingRevalidate = useRef(false);
 
-  const [isDark, setIsDark] = useState(false);
-  const t = isDark ? NIGHT : DAY;
+  const t = DAY;
 
   const [mode, setMode] = useState("view");
   const [selectedId, setSelectedId] = useState(() => digitalProducts[0]?.productId || null);
@@ -287,6 +279,7 @@ export default function HomePage() {
   const [wSearch, setWSearch] = useState("");
   const [wProduct, setWProduct] = useState(null);
   const [wFiles, setWFiles] = useState([]);
+  const [wExisting, setWExisting] = useState([]);  // existing files selected for cloning
   const [wSubmitting, setWSubmitting] = useState(false);
   const [wError, setWError] = useState(null);
   const [wCanRetry, setWCanRetry] = useState(false);       // show Retry button instead of Create
@@ -300,7 +293,6 @@ export default function HomePage() {
   const [deletedProductIds, setDeletedProductIds] = useState(new Set());
   const [pendingDeleteProductId, setPendingDeleteProductId] = useState(null); // tracks in-flight product delete
   const [productDeleteError, setProductDeleteError] = useState(null);
-  const [addBtnHover, setAddBtnHover] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null); // { id, name, fileCount }
   const [fileDeleteError, setFileDeleteError] = useState(null);
 
@@ -333,7 +325,7 @@ export default function HomePage() {
   // Show skeleton only when revalidating AND the selected product is the one that just uploaded
   // (or no product is selected). If the user is viewing a different product, skip skeleton.
   const showSkeleton = (revalidating, sel) =>
-    revalidating && mode === "view" && (!sel || sel.productId === uploadingProductId);
+    revalidating && (mode === "view" || mode === "detail") && (!sel || sel.productId === uploadingProductId);
 
   // Compute visible lists with optimistic deletes applied
   const visibleProducts = digitalProducts
@@ -344,16 +336,29 @@ export default function HomePage() {
   // isBusy is per-product — only the product currently uploading is locked
   const isBusy = isUploading && uploadingProductId === selected?.productId;
 
-  const selectProduct = (id) => { setSelectedId(id); setMode("view"); setUploadError(null); setUploadSuccess(null); };
-  const openCreate = () => { setMode("create"); setWStep(1); setWSearch(""); setWProduct(null); setWFiles([]); setWError(null); };
-
-  // Lazy-load Shopify products list when the wizard opens (cached 5 min server-side).
-  // Never blocks initial page render — loader only hits SQLite now.
+  // Fallback: if detail mode but product no longer exists, go back to list
   useEffect(() => {
-    if (mode === "create" && shopifyFetcher.state === "idle") {
-      shopifyFetcher.load("/api/products");
+    if (mode === "detail" && !selected) setMode("view");
+  }, [mode, selected]);
+
+  // Deferred revalidation — navigate to same route forces a fresh loader run
+  useEffect(() => {
+    if (pendingRevalidate.current && mode === "view") {
+      pendingRevalidate.current = false;
+      navigate(".", { replace: true });
     }
   }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const selectProduct = (id) => { setSelectedId(id); setMode("detail"); setUploadError(null); setUploadSuccess(null); };
+  const openCreate = () => { setMode("create"); setWStep(1); setWSearch(""); setWProduct(null); setWFiles([]); setWExisting([]); setWError(null); };
+
+  // Pre-fetch Shopify products on page load — by the time user clicks
+  // "Add Product", the list is already cached and wizard opens instantly.
+  useEffect(() => {
+    if (shopifyFetcher.state === "idle" && !shopifyFetcher.data) {
+      shopifyFetcher.load("/api/products");
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fire /api/stage immediately when user picks a file — so the presigned URL
   // is already ready by the time they click "Upload File".
@@ -496,7 +501,7 @@ export default function HomePage() {
 
   const handleDeleteProduct = (productId) => {
     setDeletedProductIds((prev) => { const n = new Set(prev); n.add(productId); return n; });
-    if (selectedId === productId) setSelectedId(visibleProducts.find((p) => p.productId !== productId)?.productId || null);
+    if (selectedId === productId) { setSelectedId(null); setMode("view"); }
     const fd = new FormData(); fd.append("_action", "deleteProduct"); fd.append("productId", productId);
     productDeleteFetcher.submit(fd, { method: "POST" });
   };
@@ -525,10 +530,24 @@ export default function HomePage() {
   }, [wStep]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleWizardSubmit = async () => {
-    if (wSubmitting || !wProduct || !wFiles.length) return;
+    if (wSubmitting || !wProduct || (!wFiles.length && !wExisting.length)) return;
     setWSubmitting(true); setWError(null); setWCanRetry(false); setWProgressText("0%");
     setIsUploading(true); setUploadingProductId(wProduct.id);
+    const cacheKey = wFiles.length ? resumeCacheKey(wProduct.id, wFiles) : null;
     try {
+      let uploaded = [];
+
+      // Skip entire upload section if only cloning existing files
+      if (wFiles.length) {
+      // ── 0. Load resume cache from localStorage ──────────────────────────
+      if (!Object.keys(wDonePartsRef.current).length) {
+        const cached = loadResumeCache(cacheKey);
+        if (cached) {
+          wDonePartsRef.current = cached;
+          console.log(`[Pendora] Resume: loaded ${Object.keys(cached).length} done parts from cache`);
+        }
+      }
+
       // ── 1. Build chunk plan ─────────────────────────────────────────────
       const fileChunks = wFiles.map((file) => {
         if (file.size > CHUNK_THRESHOLD) {
@@ -550,71 +569,94 @@ export default function HomePage() {
       const doneCount = Object.keys(wDonePartsRef.current).length;
       console.log(`[Pendora] Wizard: ${allParts.length} parts, ${doneCount} already done (resume), chunked=${allParts.some(p => p.isChunk)}`);
 
-      // ── 2. Helper: stage + upload one chunk with retry ──────────────────
-      const stageAndUploadPart = async (part, partIndex) => {
-        // Skip if already uploaded in a previous attempt
-        if (wDonePartsRef.current[partIndex]) return wDonePartsRef.current[partIndex];
-
+      // ── 2. Helper: get stage metadata for a part ──────────────────────
+      const getStageMeta = (part) => {
         const { file, isChunk, start, end } = part;
         const ext = file.name.includes(".") ? file.name.substring(file.name.lastIndexOf(".")) : "";
         const base = file.name.includes(".") ? file.name.substring(0, file.name.lastIndexOf(".")) : file.name;
-        const stageMeta = {
+        return {
           filename: isChunk ? `${base}_chunk${part.chunkIndex}${ext}` : file.name,
           mimeType: isChunk ? "application/octet-stream" : (file.type || "application/octet-stream"),
           fileSize: end - start,
         };
-
-        const MAX_RETRIES = 3;
-        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-          try {
-            // Just-in-time staging — fresh URL for each attempt
-            const sr = await fetch("/api/stage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent: "stage", files: [stageMeta] }) });
-            const sd = await sr.json();
-            if (!sr.ok || sd.error) throw new Error(sd.error || "Stage failed.");
-            const target = sd.targets[0];
-
-            // Upload
-            const blob = isChunk ? file.slice(start, end) : file;
-            await new Promise((res, rej) => {
-              const xhr = new XMLHttpRequest(); xhr.open("PUT", target.url);
-              if (target.parameters?.length) { for (const p of target.parameters) { try { xhr.setRequestHeader(p.name, p.value); } catch {} } }
-              if (!target.parameters?.some(p => p.name.toLowerCase() === "content-type")) { xhr.setRequestHeader("Content-Type", stageMeta.mimeType); }
-              xhr.timeout = 0;
-              xhr.upload.onprogress = (e) => {
-                if (!e.lengthComputable || !wTotalBytesRef.current) return;
-                wChunkBytesRef.current[partIndex] = e.loaded;
-                const loaded = Object.values(wChunkBytesRef.current).reduce((a, b) => a + b, 0);
-                setWProgressText(`${Math.min(Math.round((loaded / wTotalBytesRef.current) * 100), 99)}%`);
-              };
-              xhr.onerror = () => rej(new Error("Network error"));
-              xhr.onabort = () => rej(new Error("Cancelled"));
-              xhr.onload = () => xhr.status < 300 ? res() : rej(new Error(`HTTP ${xhr.status}`));
-              xhr.send(blob);
-            });
-
-            // Success — cache, update progress, return
-            wDonePartsRef.current[partIndex] = target.resourceUrl;
-            wChunkBytesRef.current[partIndex] = end - start; // mark full size for completed chunk
-            console.log(`[Pendora] Part ${partIndex + 1}/${allParts.length} OK (attempt ${attempt})`);
-            return target.resourceUrl;
-          } catch (err) {
-            console.warn(`[Pendora] Part ${partIndex + 1} attempt ${attempt}/${MAX_RETRIES} failed: ${err.message}`);
-            if (attempt === MAX_RETRIES) throw new Error(`Failed after ${MAX_RETRIES} retries: "${file.name}" part ${partIndex}`);
-            await new Promise(r => setTimeout(r, 1000 * attempt)); // backoff: 1s, 2s, 3s
-          }
-        }
       };
 
-      // ── 3. Upload all parts with concurrency pool ───────────────────────
-      const uploadTasks = allParts.map((part, i) => () => stageAndUploadPart(part, i));
-      await withConcurrency(uploadTasks, MAX_PARALLEL);
+      // ── 3. Upload in rounds: batch-stage → parallel upload → next round ─
+      // Each round: stage MAX_PARALLEL parts in 1 API call, upload them in parallel.
+      // 5GB = 200 parts → ~34 rounds, 34 stage calls (vs 200 before).
+      const MAX_RETRIES = 3;
+      for (let roundStart = 0; roundStart < allParts.length; roundStart += MAX_PARALLEL) {
+        const roundIndices = [];
+        for (let j = roundStart; j < Math.min(roundStart + MAX_PARALLEL, allParts.length); j++) roundIndices.push(j);
+
+        // Filter out already-done parts (from resume)
+        const pendingIndices = roundIndices.filter(i => !wDonePartsRef.current[i]);
+        if (!pendingIndices.length) continue; // entire round already done
+
+        // Batch stage — 1 API call for up to 6 parts
+        const pendingMetas = pendingIndices.map(i => getStageMeta(allParts[i]));
+        let targets;
+        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+          try {
+            const sr = await fetch("/api/stage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent: "stage", files: pendingMetas }) });
+            const sd = await sr.json();
+            if (!sr.ok || sd.error) throw new Error(sd.error || "Stage failed.");
+            targets = sd.targets;
+            break;
+          } catch (err) {
+            console.warn(`[Pendora] Stage round ${Math.floor(roundStart / MAX_PARALLEL) + 1} attempt ${attempt}: ${err.message}`);
+            if (attempt === MAX_RETRIES) throw new Error(`Stage failed after ${MAX_RETRIES} retries at part ${roundStart}`);
+            await new Promise(r => setTimeout(r, 1500 * attempt));
+          }
+        }
+
+        // Parallel upload this round's pending parts
+        await Promise.all(pendingIndices.map(async (partIndex, ti) => {
+          const part = allParts[partIndex];
+          const target = targets[ti];
+          const mimeType = getStageMeta(part).mimeType;
+          const blob = part.isChunk ? part.file.slice(part.start, part.end) : part.file;
+
+          for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            try {
+              await new Promise((res, rej) => {
+                const xhr = new XMLHttpRequest(); xhr.open("PUT", target.url);
+                if (target.parameters?.length) { for (const p of target.parameters) { try { xhr.setRequestHeader(p.name, p.value); } catch {} } }
+                if (!target.parameters?.some(p => p.name.toLowerCase() === "content-type")) { xhr.setRequestHeader("Content-Type", mimeType); }
+                xhr.timeout = 0;
+                xhr.upload.onprogress = (e) => {
+                  if (!e.lengthComputable || !wTotalBytesRef.current) return;
+                  wChunkBytesRef.current[partIndex] = e.loaded;
+                  const loaded = Object.values(wChunkBytesRef.current).reduce((a, b) => a + b, 0);
+                  setWProgressText(`${Math.min(Math.round((loaded / wTotalBytesRef.current) * 100), 99)}%`);
+                };
+                xhr.onerror = () => rej(new Error("Network error"));
+                xhr.onabort = () => rej(new Error("Cancelled"));
+                xhr.onload = () => xhr.status < 300 ? res() : rej(new Error(`HTTP ${xhr.status}`));
+                xhr.send(blob);
+              });
+              // Success — cache in memory + localStorage
+              wDonePartsRef.current[partIndex] = target.resourceUrl;
+              wChunkBytesRef.current[partIndex] = part.end - part.start;
+              saveResumeCache(cacheKey, wFiles, wDonePartsRef.current);
+              console.log(`[Pendora] Part ${partIndex + 1}/${allParts.length} OK`);
+              return;
+            } catch (err) {
+              console.warn(`[Pendora] Part ${partIndex + 1} upload attempt ${attempt}: ${err.message}`);
+              if (attempt === MAX_RETRIES) throw new Error(`Failed after ${MAX_RETRIES} retries: "${part.file.name}" part ${partIndex}`);
+              await new Promise(r => setTimeout(r, 1000 * attempt));
+            }
+          }
+        }));
+        console.log(`[Pendora] Round ${Math.floor(roundStart / MAX_PARALLEL) + 1} done (parts ${roundStart + 1}-${Math.min(roundStart + MAX_PARALLEL, allParts.length)})`);
+      }
       const resourceUrls = allParts.map((_, i) => wDonePartsRef.current[i]);
       setWProgressText("100%");
       console.log(`[Pendora] Wizard: all ${resourceUrls.length} parts uploaded`);
 
       // ── 4. Build save payload ───────────────────────────────────────────
       let partIdx = 0;
-      const uploaded = wFiles.map((file, fi) => {
+      uploaded = wFiles.map((file, fi) => {
         const chunks = fileChunks[fi];
         if (chunks[0].isChunk) {
           const chunkUrls = chunks.map(() => resourceUrls[partIdx++]);
@@ -622,14 +664,28 @@ export default function HomePage() {
         }
         return { resourceUrl: resourceUrls[partIdx++], filename: file.name, mimeType: file.type || "application/octet-stream", fileSize: file.size, displayName: file.name };
       });
+      } // end if (wFiles.length)
 
-      // ── 5. Save ─────────────────────────────────────────────────────────
-      const svr = await fetch("/api/stage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent: "save", files: uploaded, productId: wProduct.id, productTitle: wProduct.title, downloadEnabled: true }) });
-      const svd = await svr.json();
-      if (!svr.ok || svd.error) throw new Error(svd.error || "Save failed.");
-      console.log("[Pendora] Wizard: save OK");
-      wDonePartsRef.current = {}; // clear on success
-      setSelectedId(wProduct.id); setMode("view"); revalidate();
+      // ── 5. Save new uploads ──────────────────────────────────────────────
+      if (uploaded.length) {
+        const svr = await fetch("/api/stage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent: "save", files: uploaded, productId: wProduct.id, productTitle: wProduct.title, downloadEnabled: true }) });
+        const svd = await svr.json();
+        if (!svr.ok || svd.error) throw new Error(svd.error || "Save failed.");
+        console.log("[Pendora] Wizard: new files saved");
+      }
+
+      // ── 6. Clone existing files (instant, no upload) ────────────────────
+      if (wExisting.length) {
+        const cr = await fetch("/api/clone-file", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fileIds: wExisting.map((e) => e.id), productId: wProduct.id, productTitle: wProduct.title }) });
+        const cd = await cr.json();
+        if (!cr.ok || cd.error) throw new Error(cd.error || "Clone failed.");
+        console.log(`[Pendora] Wizard: ${wExisting.length} existing files cloned`);
+      }
+
+      wDonePartsRef.current = {};
+      try { localStorage.removeItem(cacheKey); } catch {}
+      pendingRevalidate.current = true;
+      setMode("view");
     } catch (err) {
       console.error("[Pendora] Wizard error:", err.message);
       const doneCount = Object.keys(wDonePartsRef.current).length;
@@ -659,6 +715,9 @@ export default function HomePage() {
     return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
   };
 
+  // Flat list of all existing files for "use existing" in wizard
+  const allExistingFiles = digitalProducts.flatMap((p) => p.files.map((f) => ({ ...f, productTitle: p.productTitle, productId: p.productId })));
+
   const inp = { padding: "8px 12px", border: `1px solid ${t.inputBdr}`, borderRadius: "8px", background: t.inputBg, color: t.text, fontSize: "14px", outline: "none", width: "100%", boxSizing: "border-box", transition: TR };
   const B = {
     primary:   { border: "none", borderRadius: "8px", cursor: "pointer", fontWeight: 700, fontSize: "13px", display: "inline-flex", alignItems: "center", gap: "6px", padding: "9px 20px", background: t.active, color: t.accentText, transition: TR },
@@ -679,12 +738,13 @@ export default function HomePage() {
           <div style={{ color: "rgba(255,255,255,0.65)", fontSize: "10px", fontWeight: 500, letterSpacing: "0.6px" }}>DIGITAL PRODUCTS</div>
         </div>
       </div>
-      <button
-        onClick={() => setIsDark((d) => !d)}
-        style={{ display: "flex", alignItems: "center", gap: "6px", background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.25)", borderRadius: "20px", padding: "5px 14px", color: "#fff", cursor: "pointer", fontSize: "12px", fontWeight: 600 }}
-      >
-        {isDark ? Ic.sun() : Ic.moon()} {isDark ? "Day Mode" : "Night Mode"}
-      </button>
+      {mode !== "create" && (
+        <button
+          onClick={isUploading ? undefined : openCreate}
+          style={{ padding: "7px 16px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.3)", background: "rgba(255,255,255,0.15)", color: "#fff", cursor: isUploading ? "not-allowed" : "pointer", fontSize: "13px", fontWeight: 600, display: "flex", alignItems: "center", gap: "6px", opacity: isUploading ? 0.5 : 1, transition: "all 0.15s" }}>
+          {Ic.plus(14)} Add Product
+        </button>
+      )}
     </div>
   );
 
@@ -705,74 +765,15 @@ export default function HomePage() {
     `}</style>
     <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
 
-      {/* Sidebar */}
-      <div style={{ width: "255px", flexShrink: 0, background: t.sidebar, borderRight: `1px solid ${t.sidebarBdr}`, display: "flex", flexDirection: "column", overflow: "hidden", transition: TR }}>
-        <div style={{ padding: "11px 16px", borderBottom: `1px solid ${t.sidebarBdr}`, flexShrink: 0, transition: TR }}>
-          <div style={{ fontSize: "10px", fontWeight: 800, color: t.muted, textTransform: "uppercase", letterSpacing: "0.9px" }}>Your Products</div>
-        </div>
-        {/* Add New Product — top of list */}
-        <div
-          onClick={isUploading ? undefined : openCreate}
-          onMouseEnter={() => setAddBtnHover(true)}
-          onMouseLeave={() => setAddBtnHover(false)}
-          style={{ padding: "11px 14px", borderBottom: `1px solid ${t.sidebarBdr}`, background: isUploading && addBtnHover ? t.dangerBg : mode === "create" ? t.activeBg : "transparent", borderLeft: `3px solid ${mode === "create" ? t.activeBdr : "transparent"}`, cursor: isUploading ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: "10px", flexShrink: 0, transition: "background 0.15s, opacity 0.15s", opacity: isUploading && !addBtnHover ? 0.4 : 1 }}>
-          <div style={{ width: 32, height: 32, borderRadius: "50%", background: isUploading && addBtnHover ? t.danger : t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: isUploading && addBtnHover ? "#fff" : t.accent, transition: "background 0.15s, color 0.15s", flexShrink: 0 }}>
-            {isUploading && addBtnHover
-              ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-              : Ic.plus(15)}
-          </div>
-          <span style={{ fontWeight: 700, fontSize: "13px", color: isUploading && addBtnHover ? t.danger : t.accent, transition: "color 0.15s" }}>
-            {isUploading && addBtnHover ? "Upload in progress…" : "Add New Product"}
-          </span>
-        </div>
-        <div style={{ flex: 1, overflowY: "auto" }}>
-          {isRevalidating
-            ? [1, 2, 3].map((i) => (
-                <div key={i} style={{ padding: "11px 14px", borderBottom: `1px solid ${t.sidebarBdr}`, display: "flex", alignItems: "center", gap: "10px" }}>
-                  <div style={{ width: 32, height: 32, borderRadius: "8px", background: t.border, flexShrink: 0, animation: "pendora-pulse 1.4s ease-in-out infinite" }} />
-                  <div style={{ flex: 1 }}>
-                    <div style={{ height: 11, background: t.border, borderRadius: 4, width: "68%", marginBottom: 7, animation: "pendora-pulse 1.4s ease-in-out infinite" }} />
-                    <div style={{ height: 9, background: t.border, borderRadius: 4, width: "38%", animation: `pendora-pulse 1.4s ease-in-out ${i * 0.15}s infinite` }} />
-                  </div>
-                </div>
-              ))
-            : visibleProducts.map((p) => {
-                const isActive = p.productId === selectedId && mode === "view";
-                const isUploading_ = p.productId === uploadingProductId;
-                return (
-                  <div key={p.productId} onClick={() => selectProduct(p.productId)}
-                    style={{ padding: "11px 14px", borderBottom: `1px solid ${t.sidebarBdr}`, background: isActive ? t.activeBg : "transparent", borderLeft: `3px solid ${isActive ? t.activeBdr : isUploading_ ? t.active : "transparent"}`, cursor: "pointer", display: "flex", alignItems: "center", gap: "10px", transition: TR }}>
-                    <div style={{ width: 32, height: 32, borderRadius: "8px", background: isActive ? (isDark ? "rgba(212,149,10,0.2)" : "rgba(86,120,112,0.18)") : t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: isActive ? t.active : t.accent, flexShrink: 0, transition: TR }}>
-                      {Ic.box(16)}
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 600, fontSize: "13px", color: t.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.productTitle}</div>
-                      {isUploading_ && !isActive
-                        ? <span style={{ fontSize: "10px", fontWeight: 700, color: t.active, display: "flex", alignItems: "center", gap: "4px", marginTop: "3px" }}>
-                            <span style={{ width: 6, height: 6, borderRadius: "50%", background: t.active, display: "inline-block", animation: "pendora-pulse 1s ease-in-out infinite" }} />
-                            Uploading {uploadProgress}%
-                          </span>
-                        : <span style={{ fontSize: "10px", fontWeight: 700, background: t.badgeBg, color: t.badgeText, padding: "1px 7px", borderRadius: "8px", border: `1px solid ${t.badgeBdr}`, marginTop: "3px", display: "inline-block" }}>
-                            {p.files.length} {p.files.length === 1 ? "file" : "files"}
-                          </span>
-                      }
-                    </div>
-                    {isActive && !isUploading_ && <div style={{ color: t.active, flexShrink: 0 }}>{Ic.check()}</div>}
-                  </div>
-                );
-              })}
-        </div>
-        <div style={{ padding: "8px 16px", borderTop: `1px solid ${t.sidebarBdr}`, fontSize: "10px", color: t.faint, textAlign: "center", flexShrink: 0 }}>⚡ v5-progress</div>
-      </div>
-
-      {/* Right panel */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: mode === "create" ? "hidden" : "auto", background: t.bg, transition: TRD }}>
+      {/* Main panel — full width, no sidebar */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: mode === "create" ? "hidden" : "auto", background: t.bg, transition: TRD, minHeight: 0 }}>
 
         {mode === "create" && (
           <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 }}>
-            <Wizard B={B} inp={inp} Ic={Ic} t={t} isDark={isDark}
+            <Wizard B={B} inp={inp} Ic={Ic} t={t}
               step={wStep} setStep={setWStep} search={wSearch} setSearch={setWSearch}
               wProduct={wProduct} setWProduct={setWProduct} wFiles={wFiles} setWFiles={setWFiles}
+              wExisting={wExisting} setWExisting={setWExisting} allExistingFiles={allExistingFiles}
               wSubmitting={wSubmitting} wError={wError} wCanRetry={wCanRetry} wDonePartsRef={wDonePartsRef} wProgressText={wProgressText}
               filteredShopify={filteredShopify} shopifyLoading={shopifyLoading}
               wizardFileInputRef={wizardFileInputRef} wizardPickFiles={wizardPickFiles}
@@ -780,8 +781,40 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* Skeleton while loader is refreshing — only for the product that triggered the revalidation */}
-        {showSkeleton(isRevalidating, selected) && (
+        {/* Skeleton: card list variant (view mode) */}
+        {mode === "view" && showSkeleton(isRevalidating, selected) && (
+          <div style={{ padding: "24px 28px" }}>
+            <div style={{ marginBottom: "18px" }}>
+              <div style={{ height: 17, background: t.border, borderRadius: 4, width: 160, marginBottom: 10, animation: "pendora-pulse 1.4s ease-in-out infinite" }} />
+              <div style={{ height: 12, background: t.border, borderRadius: 4, width: 80, animation: "pendora-pulse 1.4s ease-in-out 0.1s infinite" }} />
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+              {[1, 2, 3].map((i) => (
+                <div key={i} style={{ background: t.surface, border: `1px solid ${t.border}`, borderRadius: "12px", overflow: "hidden", boxShadow: t.shadow }}>
+                  <div style={{ padding: "14px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: `1px solid ${t.border}` }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                      <div style={{ width: 38, height: 38, borderRadius: "10px", background: t.border, flexShrink: 0, animation: `pendora-pulse 1.4s ease-in-out ${i * 0.1}s infinite` }} />
+                      <div>
+                        <div style={{ height: 13, background: t.border, borderRadius: 4, width: 140 + i * 20, marginBottom: 6, animation: `pendora-pulse 1.4s ease-in-out ${i * 0.1}s infinite` }} />
+                        <div style={{ height: 10, background: t.border, borderRadius: 4, width: 60, animation: `pendora-pulse 1.4s ease-in-out ${i * 0.15}s infinite` }} />
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <div style={{ height: 34, width: 56, background: t.border, borderRadius: 8, animation: `pendora-pulse 1.4s ease-in-out ${i * 0.1}s infinite` }} />
+                      <div style={{ height: 34, width: 38, background: t.border, borderRadius: 8, animation: `pendora-pulse 1.4s ease-in-out ${i * 0.15}s infinite` }} />
+                    </div>
+                  </div>
+                  <div style={{ padding: "10px 18px 10px 68px", background: "#FAFAFA" }}>
+                    <div style={{ height: 12, background: t.border, borderRadius: 4, width: `${45 + i * 10}%`, animation: `pendora-pulse 1.4s ease-in-out ${i * 0.12}s infinite` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Skeleton: detail variant (detail mode) */}
+        {mode === "detail" && showSkeleton(isRevalidating, selected) && (
           <div style={{ padding: "22px 28px" }}>
             <div style={{ marginBottom: "20px", paddingBottom: "16px", borderBottom: `1px solid ${t.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
@@ -821,49 +854,91 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* No products at all — humorous empty state */}
+        {/* ── Product Card List (view mode) ── */}
         {mode === "view" && !visibleProducts.length && !showSkeleton(isRevalidating, selected) && (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: "16px", textAlign: "center", padding: "40px 48px" }}>
-            <div style={{ fontSize: "52px", lineHeight: 1 }}>📦</div>
-            <div style={{ fontSize: "22px", fontWeight: 800, color: t.text }}>Nothing to sell yet?</div>
-            <div style={{ fontSize: "14px", color: t.muted, maxWidth: "380px", lineHeight: 1.75 }}>
-              Your digital shelf is emptier than a Wi-Fi router in the middle of the ocean.
-              <br />Add your first product and let the downloads begin!
+            <div style={{ width: 64, height: 64, borderRadius: "16px", background: t.surface, border: `1px solid ${t.border}`, display: "flex", alignItems: "center", justifyContent: "center", color: t.faint, boxShadow: t.shadow }}>{Ic.box(30)}</div>
+            <div style={{ fontSize: "20px", fontWeight: 700, color: t.text }}>No digital products yet</div>
+            <div style={{ fontSize: "14px", color: t.muted, maxWidth: "360px", lineHeight: 1.7 }}>
+              Add your first product to start selling digital files to your customers.
             </div>
-            <button onClick={openCreate} style={{ ...B.primary, padding: "11px 28px", fontSize: "14px", borderRadius: "10px", marginTop: "4px" }}>{Ic.plus(15)} Create First Product</button>
+            <button onClick={openCreate} style={{ ...B.primary, padding: "11px 28px", fontSize: "14px", borderRadius: "10px", marginTop: "4px" }}>{Ic.plus(15)} Add Product</button>
           </div>
         )}
 
-        {mode === "view" && visibleProducts.length > 0 && !selected && !showSkeleton(isRevalidating, selected) && (
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: "10px", color: t.muted }}>
-            {Ic.box(30)} <div style={{ fontSize: "14px" }}>Select a product from the sidebar</div>
+        {mode === "view" && visibleProducts.length > 0 && !showSkeleton(isRevalidating, selected) && (
+          <div style={{ padding: "24px 28px" }}>
+            <div style={{ marginBottom: "18px" }}>
+              <div style={{ fontWeight: 700, fontSize: "17px", color: t.text }}>Digital Products</div>
+              <div style={{ fontSize: "13px", color: t.muted, marginTop: "3px" }}>{visibleProducts.length} {visibleProducts.length === 1 ? "product" : "products"}</div>
+            </div>
+            {productDeleteError && <div style={{ padding: "10px 14px", background: t.dangerBg, border: `1px solid ${t.dangerBdr}`, borderRadius: "10px", color: t.danger, fontSize: "13px", marginBottom: "14px" }}>{productDeleteError}</div>}
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+              {visibleProducts.map((product) => (
+                <div key={product.productId} style={{ background: t.surface, border: `1px solid ${t.border}`, borderRadius: "12px", boxShadow: t.shadow, overflow: "hidden" }}>
+                  {/* Card header */}
+                  <div style={{ padding: "14px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: product.files.length ? `1px solid ${t.border}` : "none" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                      <div style={{ width: 38, height: 38, borderRadius: "10px", background: t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: t.accent, flexShrink: 0 }}>{Ic.box(19)}</div>
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: "14px", color: t.text }}>{product.productTitle}</div>
+                        <div style={{ fontSize: "12px", color: t.muted, marginTop: "1px" }}>{product.files.length} {product.files.length === 1 ? "file" : "files"}</div>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: "8px" }}>
+                      <button onClick={() => { setSelectedId(product.productId); setMode("detail"); setUploadError(null); setUploadSuccess(null); }} style={B.secondary}>
+                        Edit
+                      </button>
+                      <button onClick={() => setConfirmDelete({ id: product.productId, name: product.productTitle, fileCount: product.files.length })} style={B.danger}>
+                        {Ic.trash(13)}
+                      </button>
+                    </div>
+                  </div>
+                  {/* File rows */}
+                  {product.files.length > 0 && product.files.map((file, idx) => (
+                    <div key={file.id} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 18px 10px 68px", borderBottom: idx < product.files.length - 1 ? `1px solid ${t.border}` : "none", background: "#FAFAFA" }}>
+                      <div style={{ color: t.faint, flexShrink: 0 }}>{Ic.file(14)}</div>
+                      <span style={{ fontSize: "13px", fontWeight: 500, color: t.text, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.fileName}</span>
+                      <span style={{ fontSize: "10px", fontWeight: 700, color: t.accent, background: `rgba(245,165,36,0.1)`, padding: "2px 8px", borderRadius: "6px", letterSpacing: "0.3px", flexShrink: 0 }}>{getFileType(file.fileName)}</span>
+                      <span style={{ fontSize: "12px", color: t.muted, flexShrink: 0, minWidth: "55px", textAlign: "right" }}>{file.fileSize}</span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
-        {mode === "view" && selected && !showSkeleton(isRevalidating, selected) && (() => {
+        {/* ── Product Detail (edit mode) ── */}
+        {mode === "detail" && selected && !showSkeleton(isRevalidating, selected) && (() => {
           const visibleFiles = selected.files;
           return (
             <div style={{ padding: "22px 28px" }}>
-              {/* Title */}
-              <div style={{ marginBottom: "20px", paddingBottom: "16px", borderBottom: `1px solid ${t.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", transition: TRD }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                  <div style={{ width: 42, height: 42, borderRadius: "11px", background: t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: t.accent, flexShrink: 0 }}>
-                    {Ic.box(21)}
-                  </div>
-                  <div>
-                    <h2 style={{ margin: 0, fontSize: "18px", fontWeight: 700, color: t.text }}>{selected.productTitle}</h2>
-                    <div style={{ fontSize: "12px", color: t.muted, marginTop: "2px" }}>{visibleFiles.length} {visibleFiles.length === 1 ? "file" : "files"} attached</div>
-                  </div>
-                </div>
-                <button onClick={() => setConfirmDelete({ id: selected.productId, name: selected.productTitle, fileCount: selected.files.length })} disabled={isBusy} style={{ ...B.danger, opacity: isBusy ? 0.5 : 1, flexShrink: 0 }}>
-                  {Ic.trash(13)} Delete Product
+              {/* Back + Title */}
+              <div style={{ marginBottom: "20px", paddingBottom: "16px", borderBottom: `1px solid ${t.border}`, transition: TRD }}>
+                <button onClick={() => setMode("view")} style={{ background: "none", border: "none", color: t.muted, cursor: "pointer", fontSize: "13px", fontWeight: 600, padding: "0 0 10px", display: "flex", alignItems: "center", gap: "4px" }}>
+                  ← Back to products
                 </button>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                    <div style={{ width: 42, height: 42, borderRadius: "11px", background: t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: t.accent, flexShrink: 0 }}>
+                      {Ic.box(21)}
+                    </div>
+                    <div>
+                      <h2 style={{ margin: 0, fontSize: "18px", fontWeight: 700, color: t.text }}>{selected.productTitle}</h2>
+                      <div style={{ fontSize: "12px", color: t.muted, marginTop: "2px" }}>{visibleFiles.length} {visibleFiles.length === 1 ? "file" : "files"} attached</div>
+                    </div>
+                  </div>
+                  <button onClick={() => setConfirmDelete({ id: selected.productId, name: selected.productTitle, fileCount: selected.files.length })} disabled={isBusy} style={{ ...B.danger, opacity: isBusy ? 0.5 : 1, flexShrink: 0 }}>
+                    {Ic.trash(13)} Delete Product
+                  </button>
+                </div>
               </div>
 
               {/* Upload */}
               <div style={{ background: t.surface, border: `1px solid ${t.border}`, borderRadius: "12px", padding: "18px 20px", marginBottom: "16px", boxShadow: t.shadow, transition: TRD }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "7px", marginBottom: "14px" }}>
-                  <div style={{ color: t.active }}>{Ic.upload(15)}</div>
+                  <div style={{ color: t.accent }}>{Ic.upload(15)}</div>
                   <span style={{ fontWeight: 800, fontSize: "11px", color: t.muted, textTransform: "uppercase", letterSpacing: "0.7px" }}>Upload File</span>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: "11px" }}>
@@ -879,11 +954,10 @@ export default function HomePage() {
                   <button disabled={isBusy || isUploading} onClick={handleUpload} style={{ ...B.primary, opacity: (isBusy || isUploading) ? 0.6 : 1, alignSelf: "flex-start" }}>
                     {Ic.upload(14)} {isBusy ? "Uploading…" : "Upload File"}
                   </button>
-                  {/* Progress bar — only shown while THIS product is uploading */}
                   {isBusy && (
                     <div style={{ marginTop: "2px" }}>
                       <div style={{ height: 6, background: t.border, borderRadius: 999, overflow: "hidden" }}>
-                        <div style={{ height: "100%", width: `${uploadProgress}%`, background: t.active, borderRadius: 999, transition: "width 0.4s ease" }} />
+                        <div style={{ height: "100%", width: `${uploadProgress}%`, background: t.accent, borderRadius: 999, transition: "width 0.4s ease" }} />
                       </div>
                       <div style={{ display: "flex", justifyContent: "space-between", marginTop: "5px", fontSize: "11px", color: t.muted }}>
                         <span>{uploadProgress}%{uploadSpeedBps ? ` · ${formatFileSize(uploadSpeedBps)}/s` : ""}</span>
@@ -891,7 +965,7 @@ export default function HomePage() {
                       </div>
                     </div>
                   )}
-                  {uploadError && <div style={{ padding: "9px 13px", background: t.dangerBg, border: `1px solid ${t.dangerBdr}`, borderRadius: "8px", color: t.danger, fontSize: "13px" }}>{uploadError}</div>}
+                  {uploadError && <div style={{ padding: "9px 13px", background: "#fef9e7", border: "1px solid #e6c84e", borderRadius: "8px", color: "#8a6d0b", fontSize: "13px" }}>{uploadError}</div>}
                   {uploadSuccess && <div style={{ padding: "9px 13px", background: t.successBg, border: `1px solid ${t.successBdr}`, borderRadius: "8px", color: t.success, fontSize: "13px" }}>✓ {uploadSuccess}</div>}
                 </div>
               </div>
@@ -899,7 +973,7 @@ export default function HomePage() {
               {/* Files */}
               <div style={{ background: t.surface, borderRadius: "12px", border: `1px solid ${t.border}`, overflow: "hidden", boxShadow: t.shadow, transition: TRD }}>
                 <div style={{ padding: "12px 18px", borderBottom: `1px solid ${t.border}`, display: "flex", alignItems: "center", gap: "7px", transition: TRD }}>
-                  <div style={{ color: t.active }}>{Ic.file(14)}</div>
+                  <div style={{ color: t.accent }}>{Ic.file(14)}</div>
                   <span style={{ fontWeight: 800, fontSize: "11px", color: t.muted, textTransform: "uppercase", letterSpacing: "0.7px" }}>Attached Files ({visibleFiles.length})</span>
                 </div>
                 {fileDeleteError && <div style={{ padding: "9px 18px", background: t.dangerBg, color: t.danger, fontSize: "13px", borderBottom: `1px solid ${t.dangerBdr}` }}>{fileDeleteError}</div>}
@@ -908,11 +982,14 @@ export default function HomePage() {
                   : visibleFiles.map((file, idx) => (
                     <div key={file.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 18px", borderBottom: idx < visibleFiles.length - 1 ? `1px solid ${t.border}` : "none", transition: TRD }}>
                       <div style={{ display: "flex", alignItems: "center", gap: "11px" }}>
-                        <div style={{ width: 36, height: 36, borderRadius: "9px", background: t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: t.active, flexShrink: 0, transition: TRD }}>{Ic.file(18)}</div>
+                        <div style={{ width: 36, height: 36, borderRadius: "9px", background: t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: t.accent, flexShrink: 0, transition: TRD }}>{Ic.file(18)}</div>
                         <div>
                           <div style={{ fontWeight: 600, fontSize: "14px", color: t.text }}>{file.displayName}</div>
                           {file.displayName !== file.fileName && <div style={{ fontSize: "11px", color: t.faint }}>{file.fileName}</div>}
-                          <div style={{ fontSize: "11px", color: t.muted, marginTop: "1px" }}>{file.fileSize} · {new Date(file.createdAt).toLocaleDateString()}</div>
+                          <div style={{ fontSize: "11px", color: t.muted, marginTop: "1px" }}>
+                            <span style={{ fontSize: "10px", fontWeight: 700, color: t.accent, background: `rgba(245,165,36,0.1)`, padding: "1px 6px", borderRadius: "4px", marginRight: "6px" }}>{getFileType(file.fileName)}</span>
+                            {file.fileSize} · {new Date(file.createdAt).toLocaleDateString()}
+                          </div>
                         </div>
                       </div>
                       <div style={{ display: "flex", gap: "8px" }}>
@@ -963,7 +1040,7 @@ export default function HomePage() {
 
 // ─── Wizard ───────────────────────────────────────────────────────────────────
 
-function Wizard({ inp, Ic, t, step, setStep, search, setSearch, wProduct, setWProduct, wFiles, setWFiles, wSubmitting, wError, wCanRetry, wDonePartsRef, wProgressText, filteredShopify, shopifyLoading, wizardFileInputRef, wizardPickFiles, handleWizardSubmit, onCancel }) {
+function Wizard({ inp, Ic, t, step, setStep, search, setSearch, wProduct, setWProduct, wFiles, setWFiles, wExisting, setWExisting, allExistingFiles, wSubmitting, wError, wCanRetry, wDonePartsRef, wProgressText, filteredShopify, shopifyLoading, wizardFileInputRef, wizardPickFiles, handleWizardSubmit, onCancel }) {
   const btnSecondary = { padding: "11px 24px", borderRadius: "10px", fontWeight: 700, fontSize: "14px", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "8px", background: t.surface, border: `1.5px solid ${t.border}`, color: t.text, transition: "opacity 0.15s" };
   const btnPrimary   = { padding: "11px 28px", borderRadius: "10px", fontWeight: 700, fontSize: "14px", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "8px", border: "none", background: t.active, color: "#fff", transition: "opacity 0.15s" };
 
@@ -978,7 +1055,7 @@ function Wizard({ inp, Ic, t, step, setStep, search, setSearch, wProduct, setWPr
     if (step === 2) return (
       <>
         <button onClick={() => setStep(1)} style={btnSecondary}>← Back</button>
-        <button disabled={!wFiles.length} onClick={() => wFiles.length && setStep(3)} style={{ ...btnPrimary, opacity: wFiles.length ? 1 : 0.5 }}>Review →</button>
+        <button disabled={!wFiles.length && !wExisting.length} onClick={() => (wFiles.length || wExisting.length) && setStep(3)} style={{ ...btnPrimary, opacity: (wFiles.length || wExisting.length) ? 1 : 0.5 }}>Review →</button>
       </>
     );
     return (
@@ -1067,35 +1144,80 @@ function Wizard({ inp, Ic, t, step, setStep, search, setSearch, wProduct, setWPr
         {step === 2 && (
           <div>
             <div style={{ marginBottom: "20px" }}>
-              <div style={{ fontWeight: 800, fontSize: "20px", color: t.text, marginBottom: "4px" }}>Upload files</div>
+              <div style={{ fontWeight: 800, fontSize: "20px", color: t.text, marginBottom: "4px" }}>Add files</div>
               <div style={{ fontSize: "13px", color: t.muted }}>For <strong style={{ color: t.text }}>{wProduct?.title}</strong></div>
             </div>
+
+            {/* Upload new */}
             <input ref={wizardFileInputRef} type="file" multiple style={{ display: "none" }} onChange={wizardPickFiles} />
-            <button onClick={() => wizardFileInputRef.current?.click()}
-              style={{ ...btnSecondary, marginBottom: "8px" }}>
-              {Ic.plus(15)} Add Files
+            <button onClick={() => wizardFileInputRef.current?.click()} style={{ ...btnSecondary, marginBottom: "8px" }}>
+              {Ic.upload(15)} Upload New Files
             </button>
-            <div style={{ fontSize: "12px", color: t.faint, marginBottom: "16px" }}>Max 5 GB — PDF, ZIP, MP3, MP4, PNG, JPG, GIF, EPUB, DOCX, XLSX</div>
-            {!wFiles.length
-              ? <div style={{ padding: "36px 24px", border: `2px dashed ${t.border}`, borderRadius: "14px", textAlign: "center", color: t.muted, fontSize: "14px", background: t.surface, display: "flex", flexDirection: "column", alignItems: "center", gap: "10px" }}>
-                  <div style={{ color: t.accent, opacity: 0.7 }}>{Ic.upload(32)}</div>
-                  No files selected yet. Click "Add Files" above.
-                </div>
-              : <div style={{ display: "flex", flexDirection: "column", gap: "7px" }}>
-                  {wFiles.map((file, i) => (
-                    <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", border: `1px solid ${t.border}`, borderRadius: "11px", background: t.surface }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                        <div style={{ width: 38, height: 38, borderRadius: "9px", background: t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: t.accent, flexShrink: 0 }}>{Ic.file(18)}</div>
-                        <div>
-                          <div style={{ fontWeight: 600, fontSize: "14px", color: t.text }}>{file.name}</div>
-                          <div style={{ fontSize: "12px", color: t.muted, marginTop: "2px" }}>{formatFileSize(file.size)}</div>
-                        </div>
+            <div style={{ fontSize: "12px", color: t.faint, marginBottom: "12px" }}>Max 5 GB — PDF, ZIP, MP3, MP4, PNG, JPG, GIF, EPUB, DOCX, XLSX</div>
+
+            {/* New files list */}
+            {wFiles.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: "7px", marginBottom: "16px" }}>
+                {wFiles.map((file, i) => (
+                  <div key={`new-${i}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", border: `1px solid ${t.border}`, borderRadius: "11px", background: t.surface }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                      <div style={{ width: 38, height: 38, borderRadius: "9px", background: t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: t.accent, flexShrink: 0 }}>{Ic.upload(16)}</div>
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: "14px", color: t.text }}>{file.name}</div>
+                        <div style={{ fontSize: "12px", color: t.muted, marginTop: "2px" }}>{formatFileSize(file.size)} · New upload</div>
                       </div>
-                      <button onClick={() => setWFiles((p) => p.filter((_, j) => j !== i))} style={{ background: "none", border: "none", color: t.muted, cursor: "pointer", fontSize: "22px", lineHeight: 1, padding: "0 6px" }}>×</button>
+                    </div>
+                    <button onClick={() => setWFiles((p) => p.filter((_, j) => j !== i))} style={{ background: "none", border: "none", color: t.muted, cursor: "pointer", fontSize: "22px", lineHeight: 1, padding: "0 6px" }}>×</button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Existing files list (selected) */}
+            {wExisting.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: "7px", marginBottom: "16px" }}>
+                {wExisting.map((ef) => (
+                  <div key={`ex-${ef.id}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", border: `1px solid ${t.accent}`, borderRadius: "11px", background: `rgba(245,165,36,0.04)` }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                      <div style={{ width: 38, height: 38, borderRadius: "9px", background: `rgba(245,165,36,0.12)`, display: "flex", alignItems: "center", justifyContent: "center", color: t.accent, flexShrink: 0 }}>{Ic.file(16)}</div>
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: "14px", color: t.text }}>{ef.displayName || ef.fileName}</div>
+                        <div style={{ fontSize: "12px", color: t.accent, marginTop: "2px", fontWeight: 600 }}>{ef.fileSize} · From {ef.productTitle} · Instant</div>
+                      </div>
+                    </div>
+                    <button onClick={() => setWExisting((p) => p.filter((x) => x.id !== ef.id))} style={{ background: "none", border: "none", color: t.muted, cursor: "pointer", fontSize: "22px", lineHeight: 1, padding: "0 6px" }}>×</button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Empty state */}
+            {!wFiles.length && !wExisting.length && (
+              <div style={{ padding: "36px 24px", border: `2px dashed ${t.border}`, borderRadius: "14px", textAlign: "center", color: t.muted, fontSize: "14px", background: t.surface, display: "flex", flexDirection: "column", alignItems: "center", gap: "10px" }}>
+                <div style={{ color: t.accent, opacity: 0.7 }}>{Ic.upload(32)}</div>
+                Upload new files or select from existing files below.
+              </div>
+            )}
+
+            {/* Use existing files picker */}
+            {allExistingFiles.length > 0 && (
+              <div style={{ marginTop: "20px" }}>
+                <div style={{ fontWeight: 700, fontSize: "14px", color: t.text, marginBottom: "10px" }}>Or use existing files</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+                  {allExistingFiles.filter((ef) => !wExisting.find((s) => s.id === ef.id)).map((ef) => (
+                    <div key={ef.id} onClick={() => setWExisting((p) => [...p, ef])}
+                      style={{ display: "flex", alignItems: "center", gap: "12px", padding: "10px 14px", border: `1px solid ${t.border}`, borderRadius: "10px", background: t.surface, cursor: "pointer", transition: "border-color 0.12s" }}>
+                      <div style={{ width: 34, height: 34, borderRadius: "8px", background: t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: t.accent, flexShrink: 0 }}>{Ic.file(15)}</div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 500, fontSize: "13px", color: t.text }}>{ef.displayName || ef.fileName}</div>
+                        <div style={{ fontSize: "11px", color: t.muted }}>{ef.fileSize} · {ef.productTitle}</div>
+                      </div>
+                      <span style={{ fontSize: "11px", color: t.accent, fontWeight: 600 }}>+ Add</span>
                     </div>
                   ))}
                 </div>
-            }
+              </div>
+            )}
           </div>
         )}
 
@@ -1124,14 +1246,17 @@ function Wizard({ inp, Ic, t, step, setStep, search, setSearch, wProduct, setWPr
               <div style={{ display: "flex", alignItems: "flex-start", gap: "12px" }}>
                 <div style={{ width: 36, height: 36, borderRadius: "9px", background: t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: t.active, flexShrink: 0, marginTop: "2px" }}>{Ic.file(18)}</div>
                 <div>
-                  <div style={{ fontSize: "12px", color: t.muted, marginBottom: "4px" }}>Files ({wFiles.length})</div>
+                  <div style={{ fontSize: "12px", color: t.muted, marginBottom: "4px" }}>Files ({wFiles.length + wExisting.length})</div>
                   {wFiles.map((f, i) => (
-                    <div key={i} style={{ fontSize: "14px", fontWeight: 600, color: t.text, marginBottom: "3px" }}>{f.name} <span style={{ fontWeight: 400, color: t.muted, fontSize: "12px" }}>({formatFileSize(f.size)})</span></div>
+                    <div key={`n-${i}`} style={{ fontSize: "14px", fontWeight: 600, color: t.text, marginBottom: "3px" }}>{f.name} <span style={{ fontWeight: 400, color: t.muted, fontSize: "12px" }}>({formatFileSize(f.size)}) · New upload</span></div>
+                  ))}
+                  {wExisting.map((ef) => (
+                    <div key={`e-${ef.id}`} style={{ fontSize: "14px", fontWeight: 600, color: t.text, marginBottom: "3px" }}>{ef.displayName || ef.fileName} <span style={{ fontWeight: 400, color: t.accent, fontSize: "12px" }}>({ef.fileSize}) · Existing · Instant</span></div>
                   ))}
                 </div>
               </div>
             </div>
-            {wError && <div style={{ padding: "12px 16px", background: t.dangerBg, border: `1px solid ${t.dangerBdr}`, borderRadius: "10px", color: t.danger, fontSize: "14px" }}>{wError}</div>}
+            {wError && <div style={{ padding: "12px 16px", background: wCanRetry ? "#fef9e7" : t.dangerBg, border: `1px solid ${wCanRetry ? "#e6c84e" : t.dangerBdr}`, borderRadius: "10px", color: wCanRetry ? "#8a6d0b" : t.danger, fontSize: "14px" }}>{wError}</div>}
           </div>
         )}
 

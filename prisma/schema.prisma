@@ -45,9 +45,56 @@ model ProductFile {
   fileSize     BigInt?
   displayName     String?
   downloadEnabled Boolean  @default(true)
+  status          String   @default("ready")  // "pending" | "ready" | "failed"
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   @@index([shop, productId])
   @@index([shop, createdAt])
+}
+
+model EmailTemplate {
+  id          String   @id @default(cuid())
+  shop        String   @unique
+  subject     String   @default("Your digital files from {{shop_name}}")
+  heading     String   @default("Hi {{customer_name}},")
+  body        String   @default("Thank you for your order #{{order_number}}! Your digital files are ready to download.")
+  footer      String   @default("Thanks for shopping with us!")
+  buttonColor String   @default("#1B2B44")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model EmailLog {
+  id            String   @id @default(cuid())
+  shop          String
+  orderId       String
+  orderNumber   String
+  customerName  String
+  customerEmail String
+  productId     String
+  productTitle  String
+  fileIds       String
+  status        String   @default("sent")
+  error         String?
+  tokenExpiry   DateTime
+  createdAt     DateTime @default(now())
+
+  @@index([shop, createdAt])
+  @@index([shop, orderId])
+}
+
+model SmtpConfig {
+  id        String   @id @default(cuid())
+  shop      String   @unique
+  host      String   @default("")
+  port      Int      @default(587)
+  secure    Boolean  @default(false)
+  user      String   @default("")
+  pass      String   @default("")
+  fromName  String   @default("")
+  fromEmail String   @default("")
+  enabled   Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

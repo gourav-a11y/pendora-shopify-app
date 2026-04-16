@@ -7,6 +7,24 @@ const ALLOWED_EXTENSIONS = [
 ];
 const MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024; // 5GB
 
+// Acceptable MIME types — anything outside this list gets replaced with application/octet-stream
+const ALLOWED_MIME_TYPES = new Set([
+  "application/pdf",
+  "application/zip", "application/x-zip-compressed",
+  "audio/mpeg", "audio/mp3",
+  "video/mp4", "video/quicktime",
+  "image/png", "image/jpeg", "image/gif", "image/webp",
+  "application/epub+zip",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/octet-stream",
+]);
+
+function sanitizeMimeType(mimeType) {
+  const mt = (mimeType || "").toLowerCase().trim();
+  return ALLOWED_MIME_TYPES.has(mt) ? mt : "application/octet-stream";
+}
+
 /**
  * Two-phase upload endpoint — JSON only, no binary data, no tunnel issues.
  *
@@ -44,9 +62,13 @@ export const action = async ({ request }) => {
     if (!files?.length) return Response.json({ error: "No files specified." }, { status: 400 });
 
     for (const f of files) {
-      const ext = "." + f.filename.split(".").pop().toLowerCase();
+      const fname = (f.filename || "").trim();
+      if (!fname) return Response.json({ error: "Invalid filename." }, { status: 400 });
+      const lastDot = fname.lastIndexOf(".");
+      if (lastDot <= 0) return Response.json({ error: `"${fname}" — must have a valid file extension.` }, { status: 400 });
+      const ext = fname.substring(lastDot).toLowerCase().trim();
       if (!ALLOWED_EXTENSIONS.includes(ext)) {
-        return Response.json({ error: `"${f.filename}" — file type not allowed.` }, { status: 400 });
+        return Response.json({ error: `"${fname}" — file type not allowed.` }, { status: 400 });
       }
       if (f.fileSize > MAX_FILE_SIZE) {
         return Response.json({ error: `"${f.filename}" exceeds 5GB limit.` }, { status: 400 });
@@ -67,7 +89,7 @@ export const action = async ({ request }) => {
           variables: {
             input: files.map((f) => ({
               filename: f.filename,
-              mimeType: f.mimeType || "application/octet-stream",
+              mimeType: sanitizeMimeType(f.mimeType),
               resource: "FILE",
               fileSize: String(f.fileSize),
               httpMethod: "PUT",
@@ -109,10 +131,11 @@ export const action = async ({ request }) => {
               fileName: f.filename,
               fileUrl: f.chunkUrls?.length ? null : (f.resourceUrl || null),
               chunkUrls: f.chunkUrls?.length ? JSON.stringify(f.chunkUrls) : null,
-              mimeType: f.mimeType || "application/octet-stream",
+              mimeType: sanitizeMimeType(f.mimeType),
               fileSize: f.fileSize != null ? BigInt(f.fileSize) : null,
               displayName: f.displayName || f.filename,
               downloadEnabled: downloadEnabled !== false,
+              status: "pending",
             },
           })
         )
@@ -199,11 +222,11 @@ export const action = async ({ request }) => {
               .filter((item) => item.fileIndex === fi)
               .sort((a, b) => a.chunkIndex - b.chunkIndex)
               .map((item) => finalUrls[itemsToRegister.indexOf(item)]);
-            await prisma.productFile.update({ where: { id: record.id }, data: { chunkUrls: JSON.stringify(finalChunkUrls) } });
+            await prisma.productFile.update({ where: { id: record.id }, data: { chunkUrls: JSON.stringify(finalChunkUrls), status: "ready" } });
           } else {
             const idx = itemsToRegister.findIndex((item) => item.fileIndex === fi);
             if (idx >= 0 && finalUrls[idx]) {
-              await prisma.productFile.update({ where: { id: record.id }, data: { fileUrl: finalUrls[idx] } });
+              await prisma.productFile.update({ where: { id: record.id }, data: { fileUrl: finalUrls[idx], status: "ready" } });
             }
           }
         }
@@ -226,6 +249,10 @@ export const action = async ({ request }) => {
         );
       } catch (err) {
         console.error("[Pendora] Background CDN update failed:", err?.message ?? err);
+        // Mark all records from this batch as failed
+        for (const record of records) {
+          try { await prisma.productFile.update({ where: { id: record.id }, data: { status: "failed" } }); } catch {}
+        }
       }
     })();
 

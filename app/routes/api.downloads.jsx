@@ -2,17 +2,27 @@ import prisma from "../db.server";
 import { generateDownloadToken } from "../utils/token.server";
 import { unauthenticated } from "../shopify.server";
 
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
+function getCorsHeaders(request) {
+  const origin = request.headers.get("origin") || "";
+  let allowed = "";
+  try {
+    const hostname = new URL(origin).hostname;
+    if (hostname.endsWith(".myshopify.com") || hostname === "myshopify.com") {
+      allowed = origin;
+    }
+  } catch {}
+  return {
+    "Access-Control-Allow-Origin": allowed,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  };
+}
 
 // Handle CORS preflight (OPTIONS) and block GET
 export const loader = async ({ request }) => {
   return new Response(null, {
     status: request.method === "OPTIONS" ? 204 : 405,
-    headers: CORS,
+    headers: getCorsHeaders(request),
   });
 };
 
@@ -26,19 +36,35 @@ export const loader = async ({ request }) => {
  */
 export const action = async ({ request }) => {
   if (request.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: CORS });
+    return new Response(null, { status: 204, headers: getCorsHeaders(request) });
   }
 
   let body;
   try {
     body = await request.json();
   } catch {
-    return Response.json({ error: "Invalid request body." }, { status: 400, headers: CORS });
+    return Response.json({ error: "Invalid request body." }, { status: 400, headers: getCorsHeaders(request) });
   }
 
   const { orderId, shop } = body || {};
   if (!orderId || !shop) {
-    return Response.json({ error: "Missing orderId or shop." }, { status: 400, headers: CORS });
+    return Response.json({ error: "Missing orderId or shop." }, { status: 400, headers: getCorsHeaders(request) });
+  }
+
+  // Validate shop format
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/.test(shop)) {
+    return Response.json({ error: "Invalid shop." }, { status: 400, headers: getCorsHeaders(request) });
+  }
+
+  // Prevent cross-shop access: origin hostname must match the shop parameter
+  const origin = request.headers.get("origin") || "";
+  try {
+    const originHost = new URL(origin).hostname;
+    if (originHost !== shop) {
+      return Response.json({ error: "Origin mismatch." }, { status: 403, headers: getCorsHeaders(request) });
+    }
+  } catch {
+    return Response.json({ error: "Invalid origin." }, { status: 403, headers: getCorsHeaders(request) });
   }
 
   // orderConfirmation.order.id returns "gid://shopify/OrderIdentity/..." but
@@ -71,13 +97,13 @@ export const action = async ({ request }) => {
       .filter(Boolean);
   } catch (e) {
     console.error("[Pendora] /api/downloads admin query failed:", e?.message ?? e);
-    return Response.json({ products: [] }, { headers: CORS });
+    return Response.json({ products: [] }, { headers: getCorsHeaders(request) });
   }
 
   console.log("[Pendora] /api/downloads orderId:", normalizedOrderId, "productIds:", productIds);
 
   if (!productIds.length) {
-    return Response.json({ products: [] }, { headers: CORS });
+    return Response.json({ products: [] }, { headers: getCorsHeaders(request) });
   }
 
   const files = await prisma.productFile.findMany({
@@ -106,5 +132,5 @@ export const action = async ({ request }) => {
     });
   }
 
-  return Response.json({ products: Object.values(productMap) }, { headers: CORS });
+  return Response.json({ products: Object.values(productMap) }, { headers: getCorsHeaders(request) });
 };

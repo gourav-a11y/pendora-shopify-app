@@ -22,6 +22,10 @@ export const loader = async ({ request, params }) => {
       return new Response("File not found.", { status: 404 });
     }
 
+    if (!file.downloadEnabled) {
+      return new Response("This file is no longer available for download.", { status: 403 });
+    }
+
     const hasChunks = file.chunkUrls && typeof file.chunkUrls === "string";
     if (!hasChunks && !file.fileUrl) {
       return new Response("File URL not available.", { status: 404 });
@@ -29,12 +33,29 @@ export const loader = async ({ request, params }) => {
 
     // Single file — 302 redirect (fast, as before)
     if (!hasChunks) {
+      // Validate URL is from Shopify CDN to prevent open redirect
+      try {
+        const u = new URL(file.fileUrl);
+        if (!u.hostname.endsWith(".shopifycdn.com") && !u.hostname.endsWith(".shopify.com") && !u.hostname.endsWith(".googleapis.com")) {
+          return new Response("Invalid file URL.", { status: 500 });
+        }
+      } catch { return new Response("Invalid file URL.", { status: 500 }); }
       return new Response(null, { status: 302, headers: { Location: file.fileUrl, "Cache-Control": "no-store" } });
     }
 
     // Chunked file — stream all chunks sequentially
     let chunkUrls;
     try { chunkUrls = JSON.parse(file.chunkUrls); } catch { return new Response("Invalid chunk data.", { status: 500 }); }
+
+    // Validate every chunk URL is from Shopify CDN
+    for (const curl of chunkUrls) {
+      try {
+        const h = new URL(curl).hostname;
+        if (!h.endsWith(".shopifycdn.com") && !h.endsWith(".shopify.com") && !h.endsWith(".googleapis.com")) {
+          return new Response("Invalid chunk URL origin.", { status: 500 });
+        }
+      } catch { return new Response("Invalid chunk URL.", { status: 500 }); }
+    }
 
     const filename = (file.fileName || "download").replace(/"/g, '\\"');
     const headers = {

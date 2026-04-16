@@ -25,11 +25,12 @@ api_version = "2026-04"
   topics = [ "app/uninstalled" ]
   uri = "/webhooks/app/uninstalled"
 
+  [[webhooks.subscriptions]]
+  topics = [ "orders/paid" ]
+  uri = "/webhooks/orders-paid"
+
 [access_scopes]
-# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-# Note: read_orders + orders/paid webhook requires Shopify protected customer data approval
-# Apply at: https://shopify.dev/docs/apps/launch/protected-customer-data
-scopes = "write_metaobject_definitions,write_metaobjects,write_products,read_products,write_files,read_files,read_orders"
+scopes = "write_metaobject_definitions,write_metaobjects,write_products,read_products,write_files,read_files,read_orders,read_customers"
 
 [auth]
 redirect_urls = [ "https://example.com/api/auth" ]
