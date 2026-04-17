@@ -37,16 +37,23 @@ Pendora is an embedded Shopify app that bridges the gap between Shopify's physic
 
 ## Features
 
-### Merchant Dashboard — Digital Products (`/app`)
-- **First-Run Setup Guide** — New merchants land on a 3-step onboarding card (Create your first digital product → Customize your delivery email → Your first customer delivery). Step completion is auto-derived from the app's own data (no flags to toggle); the card is dismissible, collapsible, and celebrates with a "You're all set" variant when all 3 are complete. Follows Shopify's [Setup Guide composition pattern](https://shopify.dev/docs/api/app-home/patterns/compositions/setup-guide).
+### Home Dashboard (`/app`)
+- **Welcome heading** — Greets the merchant by store name.
+- **First-Run Setup Guide** — 3-step onboarding card (Create your first digital product → Customize your delivery email → Your first customer delivery). Step completion is auto-derived from the app's own data (no flags to toggle); the card is dismissible, collapsible, and celebrates with a "You're all set" variant when all 3 are complete. Follows Shopify's [Setup Guide composition pattern](https://shopify.dev/docs/api/app-home/patterns/compositions/setup-guide).
+- **Quick stats overview** — Four cards: Digital Products, Files, Storage Used, Emails Sent. Driven by a single `Promise.all` of Prisma `aggregate` / `groupBy` / `count` queries — sub-100ms even on large stores.
+- **Quick actions** — Three deep-link buttons: Add a digital product → `/app/digital-products`, Customize email → `/app/email`, Manage files → `/app/files`.
+- **Recent deliveries** — Last 5 email log entries with customer, product, status badge (Sent / Failed / Resent), and timestamp. "View all" link jumps to the full delivery log.
+- **Dismissible onboarding** — Persisted per-browser via `localStorage` (`pendora_onboarding_dismissed`), hydration-gated to avoid flash.
+
+### Digital Products (`/app/digital-products`)
 - **Product Card List** — All digital products displayed as cards with file name, type badge, size, and edit/delete options.
-- **Dashboard Search** — Live filter on the dashboard by product title. Shows `"X of Y products"` count while filtering, with a graceful no-match card and a ✕ clear button. Purely client-side — the full list is already in loader data.
+- **Dashboard Search** — Live filter by product title. Shows `"X of Y products"` count while filtering, with a graceful no-match card and a ✕ clear button. Purely client-side — the full list is already in loader data.
 - **3-Step Wizard** — Create a digital product by choosing a Shopify product, uploading files (or reusing existing ones), and reviewing before saving.
 - **Infinite-Scroll Product Picker** — Wizard step 1 loads 20 Shopify products at a time with server-side pagination. Next 20 fetched automatically as the user scrolls close to the end — scales to stores with thousands of products without a performance hit.
 - **Server-Side Product Search** — Typing in the wizard's product search bar (300ms debounced) queries Shopify's admin GraphQL `products(query:)` directly, so matching is correct even across un-loaded pages.
 - **Use Existing Files** — Attach already-uploaded files to new products instantly — no re-upload needed.
 - **Detail View** — Click "Edit" on any product card to upload more files, preview, or delete.
-- **Clean Single-Column Layout** — Digital Products heading, product count, and Add Product button sit together in a single row at the top of the dashboard.
+- **Clean Single-Column Layout** — Digital Products heading, product count, and Add Product button sit together in a single row at the top of the page.
 
 ### File Manager (`/app/files`)
 - **Deduplicated File List** — Same file used across multiple products shows as one entry with "Used in X products" count.
@@ -107,7 +114,7 @@ Pendora is an embedded Shopify app that bridges the gap between Shopify's physic
 
 ### Shopify design-guideline compliance
 - **Navigation:** `<s-app-nav>` + `<s-link>` — integrates with Shopify admin sidebar.
-- **Routing shells:** `<s-page heading=...>` + `<s-section>` in `/app/new-product`, `/app/products`, `/app/product/:id`, `auth.login`.
+- **Routing shells:** `<s-page heading=...>` + `<s-section>` in `/app/new-product`, `/app/product/:id`, `auth.login`.
 - **Onboarding:** Matches [Shopify's Setup Guide composition](https://shopify.dev/docs/api/app-home/patterns/compositions/setup-guide) — 3 steps, per-step CTA, progress counter, dismissible.
 - **Theming:** Custom pages use a single navy/amber token set (`t.surface`, `t.active`, `t.accent`, `t.success`, `t.danger`) for visual consistency across `/app`, `/app/files`, `/app/email`.
 - **Accessibility:** Role-labelled regions on interactive cards, keyboard-operable dismiss/collapse buttons, ARIA labels on icon-only controls.
@@ -122,8 +129,9 @@ Pendora is an embedded Shopify app that bridges the gap between Shopify's physic
 │                  (Embedded App iFrame)                      │
 │                                                             │
 │   ┌──────────────────────────────────────────────────────┐  │
-│   │  Sidebar Navigation                                  │  │
-│   │  ├── Digital Products (/app)                         │  │
+│   │  Pendora (app entry → /app, the Home Dashboard)      │  │
+│   │  Sub-navigation:                                     │  │
+│   │  ├── Digital Products (/app/digital-products)        │  │
 │   │  ├── Files (/app/files)                              │  │
 │   │  └── Email & Deliverables (/app/email)               │  │
 │   └──────────────────────────────────────────────────────┘  │
@@ -173,7 +181,8 @@ pendora-test/
 ├── app/
 │   ├── routes/
 │   │   ├── app.jsx                         # Layout — sidebar nav + AppProvider
-│   │   ├── app._index.jsx                  # Digital Products (cards + wizard + detail)
+│   │   ├── app._index.jsx                  # Home Dashboard (Setup Guide + stats + recent activity)
+│   │   ├── app.digital-products.jsx        # Digital Products (cards + wizard + detail + search)
 │   │   ├── app.files.jsx                   # File Manager (accordion + search/filter)
 │   │   ├── app.email.jsx                   # Email & Deliverables (template + log)
 │   │   │
@@ -543,13 +552,20 @@ Dashboard tokens expire in 1 hour. Email tokens expire in 7 days. For customer d
 
 ## Recent Changes
 
+### Mobile UX polish
+- **Global scrollbar hiding** — single `<style>` in [app.jsx](app/routes/app.jsx) hides scrollbars (`html`, `body`, `*::-webkit-scrollbar`, `scrollbar-width: none`) across every app route so no chunky browser bar cuts into the layout.
+- **Wizard 3-step indicator** — restructured using `flatMap` so each step column is a fixed-width sibling of the connector line. Circles now stay evenly spaced regardless of label length. Container padding clamps down on mobile so the stepper strip is much shorter on phones.
+- **Wizard content + footer padding** — side gutters clamp from `14px → 40px` (previously fixed `40px`) so the wizard matches the Files / Home / Email breathing room on mobile. Footer button bar also clamps height down on mobile.
+- **Modal spacing parity** — the Digital Products delete confirmation modal now uses the same overlay pattern as the Files / Email modals: `padding: 16px` on overlay, `clamp()` padding + `maxWidth: 420px` + `width: 100%` + `maxHeight: calc(100dvh - 32px)` on the card. No more cards hugging the viewport edges.
+- **Background scroll lock on open modals** — counter-based `pendora-modal-open` class toggled on `<html>` via `useEffect` in each modal-holding route. Global CSS freezes `body` + `.pendora-noscroll` scrolling while any modal is open. Counter means two concurrent modals (e.g. preview + resend) stay locked until both close.
+
 ### Scale & UX
-- First-run **Setup Guide** on `/app` — 3-step onboarding card (Create product → Customize email → First delivery). Auto-completes from app data, dismissible via localStorage, matches Shopify's Setup Guide composition pattern.
-- **Dashboard search bar** on `/app` — live filter of existing digital products by title, with `X of Y` count and a no-match card.
+- **Routing restructure:** `/app` is now a real **Home Dashboard** (Setup Guide + stats + quick actions + recent deliveries). The Digital Products feature moved to its own route at `/app/digital-products`. Sidebar nav gained a "Home" entry. The dead `app.products.jsx` duplicate was removed.
+- First-run **Setup Guide** on the Home Dashboard — 3-step onboarding card (Create product → Customize email → First delivery). Auto-completes from app data, dismissible via localStorage, matches Shopify's Setup Guide composition pattern.
+- **Dashboard search bar** on `/app/digital-products` — live filter by title, with `X of Y` count and a no-match card.
 - Wizard product picker → server-side cursor pagination (20 at a time, infinite scroll, ~5 rows early preload).
 - Server-side product search via Shopify admin GraphQL `products(query:)`.
 - Delivery log → server-side pagination (10/page) + multi-field search (customer name / email / product / file name).
-- Dashboard navbar removed; Add Product button lives next to the Digital Products heading.
 - Files page: redundant per-type size badges removed from the header.
 
 ### Reliability & Safety

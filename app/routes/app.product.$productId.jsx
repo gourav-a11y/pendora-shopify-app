@@ -192,7 +192,7 @@ export default function ProductDetailPage() {
         <s-button
           variant="tertiary"
           disabled={isBusy}
-          onClick={() => !isBusy && navigate("/app/products")}
+          onClick={() => !isBusy && navigate("/app/digital-products")}
         >
           ← Back to Digital Products
         </s-button>

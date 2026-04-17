@@ -105,6 +105,39 @@ export default function EmailPage() {
   const [body, setBody] = useState(initTpl.body);
   const [footer, setFooter] = useState(initTpl.footer);
   const [buttonColor, setButtonColor] = useState(initTpl.buttonColor);
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  // Lock background scroll + interaction while any modal (preview or resend) is open.
+  const isAnyModalOpen = previewOpen || !!resendPopup;
+  useEffect(() => {
+    if (!isAnyModalOpen) return;
+    const html = document.documentElement;
+    const n = (parseInt(html.dataset.pendoraLockCount || "0", 10) || 0) + 1;
+    html.dataset.pendoraLockCount = String(n);
+    html.classList.add("pendora-modal-open");
+    return () => {
+      const m = Math.max(0, (parseInt(html.dataset.pendoraLockCount || "0", 10) || 0) - 1);
+      html.dataset.pendoraLockCount = String(m);
+      if (m === 0) html.classList.remove("pendora-modal-open");
+    };
+  }, [isAnyModalOpen]);
+
+  // Responsive split: ≥900px = original side-by-side editor + live preview panel
+  // (no modal, no floating button). Below that = full-width editor + floating
+  // Preview button + on-demand modal. Defaults to true so SSR matches desktop.
+  const [isDesktop, setIsDesktop] = useState(true);
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const mq = window.matchMedia("(min-width: 900px)");
+    const onChange = (e) => setIsDesktop(e.matches);
+    setIsDesktop(mq.matches);
+    if (mq.addEventListener) mq.addEventListener("change", onChange);
+    else mq.addListener(onChange);
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener("change", onChange);
+      else mq.removeListener(onChange);
+    };
+  }, []);
   const [tplMsg, setTplMsg] = useState(null);
 
   // Log search + page state. Debounce search 300ms so we don't hit the server on every keystroke.
@@ -205,67 +238,133 @@ export default function EmailPage() {
   };
 
   return (
-    <div style={{ padding: "20px 28px", fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", color: C.text }}>
+    <div className="pendora-noscroll" style={{ position: "fixed", inset: 0, overflow: "auto", scrollbarWidth: "none", msOverflowStyle: "none", background: C.bg, padding: "clamp(14px, 4vw, 20px) clamp(14px, 4vw, 28px)", fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", color: C.text, boxSizing: "border-box" }}>
+      <style>{`.pendora-noscroll::-webkit-scrollbar { width: 0; height: 0; display: none; }`}</style>
 
       <div style={{ marginBottom: "20px" }}>
-        <div style={{ fontWeight: 800, fontSize: "20px" }}>Email & Deliverables</div>
+        <div style={{ fontWeight: 800, fontSize: "clamp(18px, 4.5vw, 20px)" }}>Email & Deliverables</div>
         <div style={{ fontSize: "13px", color: C.muted, marginTop: "3px" }}>Automated download emails sent to customers on purchase</div>
       </div>
 
+      {/* Tabs — only 2 short tabs, no scroll needed */}
       <div style={{ display: "flex", gap: "0", marginBottom: "24px", borderBottom: `1px solid ${C.border}` }}>
         {TABS.map((t) => (
           <button key={t.key} onClick={() => setTab(t.key)} style={{
             padding: "10px 20px", fontSize: "13px", fontWeight: tab === t.key ? 700 : 500,
             color: tab === t.key ? C.navy : C.muted, background: "none", border: "none",
             borderBottom: tab === t.key ? `2px solid ${C.navy}` : "2px solid transparent",
-            cursor: "pointer", marginBottom: "-1px",
+            cursor: "pointer", marginBottom: "-1px", whiteSpace: "nowrap",
           }}>{t.label}</button>
         ))}
       </div>
 
-      {/* ── TEMPLATE TAB ── */}
-      {tab === "template" && (
-        <div style={{ display: "flex", gap: "24px", alignItems: "flex-start" }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={card}>
-              <div style={{ fontWeight: 700, fontSize: "15px", marginBottom: "16px" }}>Customize Email</div>
-              <div style={{ marginBottom: "14px" }}><div style={lbl}>Subject Line</div><input value={subject} onChange={(e) => setSubject(e.target.value)} style={inp} /></div>
-              <div style={{ marginBottom: "14px" }}><div style={lbl}>Greeting</div><input value={heading} onChange={(e) => setHeading(e.target.value)} style={inp} /></div>
-              <div style={{ marginBottom: "14px" }}><div style={lbl}>Body</div><textarea value={body} onChange={(e) => setBody(e.target.value)} style={textarea} /></div>
-              <div style={{ marginBottom: "14px" }}><div style={lbl}>Footer</div><input value={footer} onChange={(e) => setFooter(e.target.value)} style={inp} /></div>
-              <div style={{ marginBottom: "18px" }}>
-                <div style={lbl}>Button Color</div>
-                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                  <input type="color" value={buttonColor} onChange={(e) => setButtonColor(e.target.value)} style={{ width: 40, height: 34, border: `1px solid ${C.border}`, borderRadius: "6px", padding: 0, cursor: "pointer" }} />
-                  <input value={buttonColor} onChange={(e) => setButtonColor(e.target.value)} style={{ ...inp, width: "120px" }} />
+      {/* ── TEMPLATE TAB ─────────────────────────────────────────────────── */}
+      {tab === "template" && (() => {
+        // Editor card body — shared by both layouts.
+        const editorCard = (
+          <div style={card}>
+            <div style={{ fontWeight: 700, fontSize: "15px", marginBottom: "16px" }}>Customize Email</div>
+            <div style={{ marginBottom: "14px" }}><div style={lbl}>Subject Line</div><input value={subject} onChange={(e) => setSubject(e.target.value)} style={inp} /></div>
+            <div style={{ marginBottom: "14px" }}><div style={lbl}>Greeting</div><input value={heading} onChange={(e) => setHeading(e.target.value)} style={inp} /></div>
+            <div style={{ marginBottom: "14px" }}><div style={lbl}>Body</div><textarea value={body} onChange={(e) => setBody(e.target.value)} style={textarea} /></div>
+            <div style={{ marginBottom: "14px" }}><div style={lbl}>Footer</div><input value={footer} onChange={(e) => setFooter(e.target.value)} style={inp} /></div>
+            <div style={{ marginBottom: "18px" }}>
+              <div style={lbl}>Button Color</div>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+                <input type="color" value={buttonColor} onChange={(e) => setButtonColor(e.target.value)} style={{ width: 40, height: 34, border: `1px solid ${C.border}`, borderRadius: "6px", padding: 0, cursor: "pointer" }} />
+                <input value={buttonColor} onChange={(e) => setButtonColor(e.target.value)} style={{ ...inp, width: "140px" }} />
+              </div>
+            </div>
+            <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: "8px", padding: "10px 14px", marginBottom: "16px" }}>
+              <div style={{ fontSize: "11px", fontWeight: 700, color: C.muted, marginBottom: "6px", textTransform: "uppercase" }}>Dynamic Variables</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                {dynVars.map((v) => <span key={v} style={{ fontSize: "12px", background: C.surface, border: `1px solid ${C.border}`, padding: "3px 10px", borderRadius: "6px", color: C.accent, fontWeight: 600, fontFamily: "monospace" }}>{`{{${v}}}`}</span>)}
+              </div>
+            </div>
+            {/* Action row — only Save Template. Preview is the floating button (mobile) or the live panel (desktop). */}
+            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+              <button
+                onClick={saveTemplate}
+                disabled={!isTemplateDirty || tplFetcher.state !== "idle"}
+                style={{ ...btnP, opacity: (!isTemplateDirty || tplFetcher.state !== "idle") ? 0.5 : 1, cursor: (!isTemplateDirty || tplFetcher.state !== "idle") ? "not-allowed" : "pointer" }}
+              >
+                {tplFetcher.state !== "idle" ? "Saving..." : "Save Template"}
+              </button>
+              {tplMsg && <span style={{ fontSize: "13px", color: tplFetcher.data?.success ? C.success : C.danger, fontWeight: 600 }}>{tplMsg}</span>}
+            </div>
+          </div>
+        );
+
+        // ── DESKTOP (≥ 900px): original side-by-side layout — editor + live preview panel ──
+        if (isDesktop) {
+          return (
+            <div style={{ display: "flex", gap: "24px", alignItems: "flex-start" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>{editorCard}</div>
+              <div style={{ width: "380px", flexShrink: 0 }}>
+                <div style={card}>
+                  <div style={{ fontWeight: 700, fontSize: "13px", color: C.muted, marginBottom: "12px", textTransform: "uppercase", letterSpacing: "0.5px" }}>Live Preview</div>
+                  <div dangerouslySetInnerHTML={{ __html: previewHtml() }} />
                 </div>
               </div>
-              <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: "8px", padding: "10px 14px", marginBottom: "16px" }}>
-                <div style={{ fontSize: "11px", fontWeight: 700, color: C.muted, marginBottom: "6px", textTransform: "uppercase" }}>Dynamic Variables</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
-                  {dynVars.map((v) => <span key={v} style={{ fontSize: "12px", background: C.surface, border: `1px solid ${C.border}`, padding: "3px 10px", borderRadius: "6px", color: C.accent, fontWeight: 600, fontFamily: "monospace" }}>{`{{${v}}}`}</span>)}
-                </div>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                <button
-                  onClick={saveTemplate}
-                  disabled={!isTemplateDirty || tplFetcher.state !== "idle"}
-                  style={{ ...btnP, opacity: (!isTemplateDirty || tplFetcher.state !== "idle") ? 0.5 : 1, cursor: (!isTemplateDirty || tplFetcher.state !== "idle") ? "not-allowed" : "pointer" }}
+            </div>
+          );
+        }
+
+        // ── MOBILE / TABLET (< 900px): full-width editor + floating Preview FAB + on-demand modal ──
+        return (
+          <div style={{ maxWidth: "640px" }}>
+            {editorCard}
+
+            {/* Floating Preview FAB — always-accessible regardless of scroll */}
+            <button
+              onClick={() => setPreviewOpen(true)}
+              aria-label="Preview email"
+              style={{
+                position: "fixed", right: "20px", bottom: "20px", zIndex: 50,
+                background: C.navy, color: "#fff", border: "none",
+                borderRadius: "999px", padding: "12px 18px",
+                fontSize: "13px", fontWeight: 700, cursor: "pointer",
+                boxShadow: "0 6px 20px rgba(0,0,0,0.18)",
+                display: "inline-flex", alignItems: "center", gap: "8px",
+              }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              Preview
+            </button>
+
+            {/* Preview modal */}
+            {previewOpen && (
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-label="Email preview"
+                onClick={() => setPreviewOpen(false)}
+                style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: "16px", boxSizing: "border-box", overflowY: "auto" }}
+              >
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  style={{ background: C.surface, borderRadius: "14px", maxWidth: "560px", width: "100%", boxShadow: "0 12px 40px rgba(0,0,0,0.28)", overflow: "hidden", maxHeight: "calc(100dvh - 32px)", display: "flex", flexDirection: "column", boxSizing: "border-box" }}
                 >
-                  {tplFetcher.state !== "idle" ? "Saving..." : "Save Template"}
-                </button>
-                {tplMsg && <span style={{ fontSize: "13px", color: tplFetcher.data?.success ? C.success : C.danger, fontWeight: 600 }}>{tplMsg}</span>}
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 18px", borderBottom: `1px solid ${C.border}` }}>
+                    <div style={{ fontWeight: 700, fontSize: "14px" }}>Email preview</div>
+                    <button
+                      onClick={() => setPreviewOpen(false)}
+                      aria-label="Close preview"
+                      style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", padding: "4px 8px", fontSize: "20px", lineHeight: 1 }}
+                    >×</button>
+                  </div>
+                  <div style={{ padding: "18px", overflowY: "auto", background: C.bg }}>
+                    <div dangerouslySetInnerHTML={{ __html: previewHtml() }} />
+                  </div>
+                  <div style={{ padding: "12px 18px", borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "flex-end" }}>
+                    <button onClick={() => setPreviewOpen(false)} style={{ ...btnS, padding: "8px 16px", fontSize: "13px" }}>Close preview</button>
+                  </div>
+                </div>
               </div>
-            </div>
+            )}
           </div>
-          <div style={{ width: "380px", flexShrink: 0 }}>
-            <div style={card}>
-              <div style={{ fontWeight: 700, fontSize: "13px", color: C.muted, marginBottom: "12px", textTransform: "uppercase", letterSpacing: "0.5px" }}>Live Preview</div>
-              <div dangerouslySetInnerHTML={{ __html: previewHtml() }} />
-            </div>
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* ── DELIVERY LOG TAB ── */}
       {tab === "log" && (
@@ -309,33 +408,73 @@ export default function EmailPage() {
               </div>
             </div>
           ) : (
-            <div style={{ ...card, padding: 0, overflow: "hidden", opacity: logFetcher.state !== "idle" ? 0.65 : 1, transition: "opacity 0.15s" }}>
-              <div style={{ padding: "14px 20px", borderBottom: `1px solid ${C.border}`, fontWeight: 700, fontSize: "14px" }}>
+            <div style={{ opacity: logFetcher.state !== "idle" ? 0.65 : 1, transition: "opacity 0.15s" }}>
+              {/* Section heading — outside the cards, above the list */}
+              <div style={{ fontWeight: 700, fontSize: "14px", color: C.text, padding: "0 4px", marginBottom: "12px" }}>
                 {searchDebounced ? `Matches: ${pagination?.total ?? initLogs.length}` : `Recent Emails (${pagination?.total ?? initLogs.length})`}
               </div>
-              {initLogs.map((log, idx) => {
-                const statusColor = log.status === "failed" ? C.danger : C.success;
-                const statusBg = log.status === "failed" ? C.dangerBg : C.successBg;
-                const statusBdr = log.status === "failed" ? C.dangerBdr : C.successBdr;
-                const statusIcon = log.status === "failed" ? "✗" : "✓";
-                const statusLabel = log.status === "resent" ? "Resent" : log.status === "sent" ? "Sent" : "Failed";
-                return (
-                  <div key={log.id} style={{ display: "flex", alignItems: "center", padding: "12px 20px", borderBottom: idx < initLogs.length - 1 ? `1px solid ${C.border}` : "none", gap: "14px" }}>
-                    <div style={{ width: 36, height: 36, borderRadius: "9px", background: statusBg, border: `1px solid ${statusBdr}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "14px", flexShrink: 0 }}>{statusIcon}</div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 600, fontSize: "14px" }}>{log.customerName} <span style={{ fontWeight: 400, color: C.muted, fontSize: "12px" }}>({log.customerEmail})</span></div>
-                      <div style={{ fontSize: "12px", color: C.muted, marginTop: "2px" }}>{log.productTitle} &middot; {log.orderNumber} &middot; {new Date(log.createdAt).toLocaleDateString()}</div>
-                      {log.error && <div style={{ fontSize: "11px", color: C.danger, marginTop: "3px" }}>{log.error}</div>}
+
+              {/* Each email is its own card with a small vertical gap between them */}
+              <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                {initLogs.map((log) => {
+                  const statusColor = log.status === "failed" ? C.danger : C.success;
+                  const statusBg = log.status === "failed" ? C.dangerBg : C.successBg;
+                  const statusBdr = log.status === "failed" ? C.dangerBdr : C.successBdr;
+                  const statusLabel = log.status === "resent" ? "Resent" : log.status === "sent" ? "Sent" : "Failed";
+                  const dateStr = new Date(log.createdAt).toLocaleDateString();
+
+                  // Desktop (≥ 900px): original single-line layout — now without the redundant icon.
+                  if (isDesktop) {
+                    return (
+                      <div key={log.id} style={{ ...card, display: "flex", alignItems: "center", padding: "12px 20px", gap: "14px" }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 600, fontSize: "14px" }}>{log.customerName} <span style={{ fontWeight: 400, color: C.muted, fontSize: "12px" }}>({log.customerEmail})</span></div>
+                          <div style={{ fontSize: "12px", color: C.muted, marginTop: "2px" }}>{log.productTitle} &middot; {log.orderNumber} &middot; {dateStr}</div>
+                          {log.error && <div style={{ fontSize: "11px", color: C.danger, marginTop: "3px" }}>{log.error}</div>}
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0 }}>
+                          <span style={{ fontSize: "11px", fontWeight: 700, padding: "3px 10px", borderRadius: "6px", background: statusBg, color: statusColor, border: `1px solid ${statusBdr}` }}>{statusLabel}</span>
+                          <button onClick={() => openResendPopup(log)} disabled={resendFetcher.state !== "idle"} style={{ ...btnS, padding: "6px 12px", fontSize: "12px" }}>Resend</button>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  // Mobile / tablet: stacked card; Resend button inline-right of product/date.
+                  return (
+                    <div key={log.id} style={{ ...card, padding: "14px 16px" }}>
+                      {/* Top row: (name + email) + status badge — icon removed (badge already conveys status) */}
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: "12px" }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 600, fontSize: "14px", color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{log.customerName}</div>
+                          <div style={{ fontSize: "12px", color: C.muted, marginTop: "1px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{log.customerEmail}</div>
+                        </div>
+                        <span style={{ fontSize: "11px", fontWeight: 700, padding: "3px 9px", borderRadius: "6px", background: statusBg, color: statusColor, border: `1px solid ${statusBdr}`, whiteSpace: "nowrap", flexShrink: 0, marginTop: "4px" }}>{statusLabel}</span>
+                      </div>
+
+                      {/* Product/order/date block + Resend button on the right of it */}
+                      <div style={{ display: "flex", alignItems: "flex-end", gap: "12px", marginTop: "12px" }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: "11.5px", color: C.muted, lineHeight: 1.5, overflowWrap: "break-word", wordBreak: "break-word" }}>
+                            {log.productTitle}
+                          </div>
+                          <div style={{ fontSize: "11.5px", color: C.muted, lineHeight: 1.5, marginTop: "2px" }}>
+                            {log.orderNumber} &middot; {dateStr}
+                          </div>
+                          {log.error && (
+                            <div style={{ fontSize: "11px", color: C.danger, marginTop: "6px", wordBreak: "break-word" }}>{log.error}</div>
+                          )}
+                        </div>
+                        <button onClick={() => openResendPopup(log)} disabled={resendFetcher.state !== "idle"} style={{ ...btnS, padding: "6px 14px", fontSize: "12px", flexShrink: 0 }}>Resend</button>
+                      </div>
                     </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0 }}>
-                      <span style={{ fontSize: "11px", fontWeight: 700, padding: "3px 10px", borderRadius: "6px", background: statusBg, color: statusColor, border: `1px solid ${statusBdr}` }}>{statusLabel}</span>
-                      <button onClick={() => openResendPopup(log)} disabled={resendFetcher.state !== "idle"} style={{ ...btnS, padding: "6px 12px", fontSize: "12px" }}>Resend</button>
-                    </div>
-                  </div>
-                );
-              })}
-              {resendFetcher.data?.success && <div style={{ padding: "10px 20px", background: C.successBg, color: C.success, fontSize: "13px", fontWeight: 600, borderTop: `1px solid ${C.successBdr}` }}>Email resent successfully!</div>}
-              {resendFetcher.data?.error && <div style={{ padding: "10px 20px", background: C.dangerBg, color: C.danger, fontSize: "13px", borderTop: `1px solid ${C.dangerBdr}` }}>{resendFetcher.data.error}</div>}
+                  );
+                })}
+              </div>
+
+              {/* Resend toast feedback — sits below the list */}
+              {resendFetcher.data?.success && <div style={{ marginTop: "12px", padding: "10px 14px", background: C.successBg, color: C.success, fontSize: "13px", fontWeight: 600, border: `1px solid ${C.successBdr}`, borderRadius: "10px" }}>Email resent successfully!</div>}
+              {resendFetcher.data?.error && <div style={{ marginTop: "12px", padding: "10px 14px", background: C.dangerBg, color: C.danger, fontSize: "13px", border: `1px solid ${C.dangerBdr}`, borderRadius: "10px" }}>{resendFetcher.data.error}</div>}
             </div>
           )}
 
@@ -366,8 +505,8 @@ export default function EmailPage() {
 
           {/* Resend popup */}
           {resendPopup && (
-            <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 999 }}>
-              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: "16px", padding: "28px 32px", maxWidth: "480px", width: "90%", boxShadow: "0 8px 40px rgba(0,0,0,0.3)" }}>
+            <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 999, padding: "16px", boxSizing: "border-box", overflowY: "auto" }}>
+              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: "16px", padding: "clamp(20px, 5vw, 28px) clamp(20px, 5vw, 32px)", maxWidth: "480px", width: "100%", boxShadow: "0 8px 40px rgba(0,0,0,0.3)", boxSizing: "border-box", maxHeight: "calc(100dvh - 32px)", overflowY: "auto" }}>
                 <div style={{ fontSize: "18px", fontWeight: 800, marginBottom: "6px" }}>Resend Email</div>
                 <div style={{ fontSize: "13px", color: C.muted, marginBottom: "18px" }}>
                   {resendPopup.log.customerName} &middot; {resendPopup.log.orderNumber}

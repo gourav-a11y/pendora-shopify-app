@@ -100,6 +100,19 @@ export default function FilesPage() {
   const [sortBy, setSortBy] = useState("date");
   const [expandedKey, setExpandedKey] = useState(null);
   const [popup, setPopup] = useState(null);
+  // Lock background scroll + interaction while the popup is open.
+  useEffect(() => {
+    if (!popup) return;
+    const html = document.documentElement;
+    const n = (parseInt(html.dataset.pendoraLockCount || "0", 10) || 0) + 1;
+    html.dataset.pendoraLockCount = String(n);
+    html.classList.add("pendora-modal-open");
+    return () => {
+      const m = Math.max(0, (parseInt(html.dataset.pendoraLockCount || "0", 10) || 0) - 1);
+      html.dataset.pendoraLockCount = String(m);
+      if (m === 0) html.classList.remove("pendora-modal-open");
+    };
+  }, [popup]);
   const [replaceUploading, setReplaceUploading] = useState(false);
   const [replaceProgress, setReplaceProgress] = useState(0);
   const [deletedKeys, setDeletedKeys] = useState(new Set());
@@ -175,12 +188,13 @@ export default function FilesPage() {
   const FILTERS = [{ key: "all", label: "All" }, { key: "document", label: "Documents" }, { key: "image", label: "Images" }, { key: "video", label: "Video" }, { key: "audio", label: "Audio" }, { key: "archive", label: "Archives" }];
 
   return (
-    <div style={{ padding: "20px 28px", fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", color: C.text }}>
+    <div className="pendora-noscroll" style={{ position: "fixed", inset: 0, overflow: "auto", scrollbarWidth: "none", msOverflowStyle: "none", background: C.bg, padding: "clamp(14px, 4vw, 20px) clamp(14px, 4vw, 28px)", fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", color: C.text, boxSizing: "border-box" }}>
+      <style>{`.pendora-noscroll::-webkit-scrollbar { width: 0; height: 0; display: none; }`}</style>
       <input ref={replaceInputRef} type="file" style={{ display: "none" }} onChange={handleReplaceFile} />
 
       {/* Header */}
       <div style={{ marginBottom: "20px" }}>
-        <div style={{ fontWeight: 800, fontSize: "20px" }}>Files</div>
+        <div style={{ fontWeight: 800, fontSize: "clamp(18px, 4.5vw, 20px)" }}>Files</div>
         <div style={{ fontSize: "13px", color: C.muted, marginTop: "3px" }}>{totalFiles} unique {totalFiles === 1 ? "file" : "files"} &middot; {totalSize} total</div>
       </div>
 
@@ -194,14 +208,16 @@ export default function FilesPage() {
       )}
 
       {allFiles.length > 0 && (
-        <div style={{ display: "flex", gap: "12px", alignItems: "center", marginBottom: "16px", flexWrap: "wrap" }}>
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search files..." style={{ ...inp, width: "240px" }} />
-          <div style={{ display: "flex", gap: "4px" }}>
+        <div style={{ display: "flex", gap: "10px", flexDirection: "column", marginBottom: "16px" }}>
+          {/* Search — full width on mobile, capped on desktop */}
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search files..." style={{ ...inp, width: "100%", maxWidth: "320px" }} />
+          {/* Filter pills — wrap to multiple rows on small viewports instead of horizontal scroll */}
+          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
             {FILTERS.map((tf) => (
-              <button key={tf.key} onClick={() => setTypeFilter(tf.key)} style={{ padding: "6px 12px", fontSize: "12px", fontWeight: typeFilter === tf.key ? 700 : 500, background: typeFilter === tf.key ? C.navy : C.surface, color: typeFilter === tf.key ? "#fff" : C.muted, border: `1px solid ${typeFilter === tf.key ? C.navy : C.border}`, borderRadius: "6px", cursor: "pointer" }}>{tf.label}</button>
+              <button key={tf.key} onClick={() => setTypeFilter(tf.key)} style={{ padding: "6px 12px", fontSize: "12px", fontWeight: typeFilter === tf.key ? 700 : 500, background: typeFilter === tf.key ? C.navy : C.surface, color: typeFilter === tf.key ? "#fff" : C.muted, border: `1px solid ${typeFilter === tf.key ? C.navy : C.border}`, borderRadius: "6px", cursor: "pointer", whiteSpace: "nowrap" }}>{tf.label}</button>
             ))}
           </div>
-          <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} style={{ ...inp, width: "auto", padding: "6px 10px", fontSize: "12px" }}>
+          <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} style={{ ...inp, width: "auto", padding: "6px 10px", fontSize: "12px", alignSelf: "flex-start" }}>
             <option value="date">Newest first</option><option value="name">Name A-Z</option><option value="size">Largest first</option><option value="type">File type</option>
           </select>
         </div>
@@ -230,16 +246,19 @@ export default function FilesPage() {
 
             return (
               <div key={file.key} style={{ ...card, overflow: "hidden" }}>
-                {/* Collapsed row — always visible */}
-                <div style={{ display: "flex", alignItems: "center", padding: "14px 18px", gap: "14px", cursor: "pointer" }} onClick={() => setExpandedKey(isOpen ? null : file.key)}>
-                  <div style={{ width: 38, height: 38, borderRadius: "9px", background: C.pill, display: "flex", alignItems: "center", justifyContent: "center", color: C.accent, flexShrink: 0 }}>{Icon(18)}</div>
+                {/* Collapsed row — single line, file name truncates with ellipsis if needed.
+                    Type + size live as metadata under the name (intentional 2-line layout, not wrap). */}
+                <div style={{ display: "flex", alignItems: "center", padding: "12px 14px", gap: "12px", cursor: "pointer" }} onClick={() => setExpandedKey(isOpen ? null : file.key)}>
+                  <div style={{ width: 36, height: 36, borderRadius: "9px", background: C.pill, display: "flex", alignItems: "center", justifyContent: "center", color: C.accent, flexShrink: 0 }}>{Icon(17)}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: "14px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.displayName}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "3px" }}>
+                      <span style={{ fontSize: "10px", fontWeight: 700, color: C.accent, background: "rgba(245,165,36,0.1)", padding: "1px 7px", borderRadius: "5px", flexShrink: 0 }}>{getFileType(file.fileName)}</span>
+                      <span style={{ fontSize: "12px", color: C.muted, flexShrink: 0 }}>{file.fileSize}</span>
+                    </div>
                   </div>
-                  <span style={{ fontSize: "10px", fontWeight: 700, color: C.accent, background: "rgba(245,165,36,0.1)", padding: "2px 8px", borderRadius: "5px", flexShrink: 0 }}>{getFileType(file.fileName)}</span>
-                  <span style={{ fontSize: "13px", color: C.muted, flexShrink: 0, minWidth: "60px", textAlign: "right" }}>{file.fileSize}</span>
-                  <button onClick={(e) => { e.stopPropagation(); setExpandedKey(isOpen ? null : file.key); }} style={{ ...btnS, fontSize: "12px", padding: "5px 12px", color: isOpen ? C.navy : C.muted, borderColor: isOpen ? C.navy : C.border }}>
-                    {isOpen ? "Hide" : "View Details"}
+                  <button onClick={(e) => { e.stopPropagation(); setExpandedKey(isOpen ? null : file.key); }} style={{ ...btnS, fontSize: "12px", padding: "6px 12px", color: isOpen ? C.navy : C.muted, borderColor: isOpen ? C.navy : C.border, flexShrink: 0, whiteSpace: "nowrap" }}>
+                    {isOpen ? "Hide Details" : "View Details"}
                   </button>
                 </div>
 
@@ -286,16 +305,16 @@ export default function FilesPage() {
 
       {/* ── Popup: Product picker + Confirm ── */}
       {popup && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 999 }}>
-          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: "16px", padding: "28px 32px", maxWidth: "460px", width: "90%", boxShadow: "0 8px 40px rgba(0,0,0,0.3)" }}>
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 999, padding: "16px", boxSizing: "border-box", overflowY: "auto" }}>
+          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: "16px", padding: "clamp(20px, 5vw, 28px) clamp(20px, 5vw, 32px)", maxWidth: "460px", width: "100%", boxShadow: "0 8px 40px rgba(0,0,0,0.3)", boxSizing: "border-box", maxHeight: "calc(100dvh - 32px)", overflowY: "auto" }}>
             <div style={{ width: 48, height: 48, borderRadius: "12px", background: popup.type === "delete" ? C.dangerBg : "rgba(245,165,36,0.1)", border: `1px solid ${popup.type === "delete" ? C.dangerBdr : C.accent}`, display: "flex", alignItems: "center", justifyContent: "center", color: popup.type === "delete" ? C.danger : C.accent, marginBottom: "16px" }}>
               {popup.type === "delete"
                 ? <svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                 : <svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>}
             </div>
             <div style={{ fontSize: "18px", fontWeight: 800, marginBottom: "6px" }}>{popup.type === "delete" ? "Delete File" : "Replace File"}</div>
-            <div style={{ fontSize: "14px", color: C.muted, marginBottom: "16px" }}>
-              <strong style={{ color: C.text }}>{popup.file.displayName}</strong>
+            <div style={{ fontSize: "14px", color: C.muted, marginBottom: "16px", wordBreak: "break-word" }}>
+              <strong style={{ color: C.text, wordBreak: "break-all" }}>{popup.file.displayName}</strong>
               {popup.file.products.length > 1 && !popup.selectedProduct && <span> is used in {popup.file.products.length} products. Select which product to {popup.type === "delete" ? "remove it from" : "replace it in"}:</span>}
               {popup.file.products.length === 1 && popup.type === "delete" && <span> is the only file in <strong style={{ color: C.text }}>{popup.file.products[0].productTitle}</strong>. Deleting it will also <strong style={{ color: C.danger }}>remove the product</strong> from Pendora.</span>}
               {popup.file.products.length === 1 && popup.type === "replace" && <span> in <strong style={{ color: C.text }}>{popup.file.products[0].productTitle}</strong> will be replaced. Previous purchasers will be notified.</span>}

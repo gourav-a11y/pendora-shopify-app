@@ -164,7 +164,15 @@ export default function NewProductPage() {
       const saveData = await saveRes.json();
       if (!saveRes.ok || saveData.error) throw new Error(saveData.error || "Failed to save files.");
 
-      window.location.href = "/app/products";
+      // SPA navigate + handoff toast via sessionStorage. Avoids the full-page reload
+      // gap; the destination's loader runs while the success toast is visible.
+      try {
+        sessionStorage.setItem("pendora_toast", JSON.stringify({
+          message: `Your digital product "${selectedProduct?.title || "product"}" has been created`,
+          type: "success",
+        }));
+      } catch {}
+      navigate("/app/digital-products");
     } catch (err) {
       setSubmitError(err.message || "Something went wrong. Please try again.");
       setIsSubmitting(false);
@@ -178,7 +186,7 @@ export default function NewProductPage() {
         <s-button
           variant="tertiary"
           disabled={isSubmitting}
-          onClick={() => !isSubmitting && navigate("/app/products")}
+          onClick={() => !isSubmitting && navigate("/app/digital-products")}
         >
           ← Back
         </s-button>
@@ -240,7 +248,7 @@ export default function NewProductPage() {
                   key={product.id}
                   onClick={() => {
                     if (already) {
-                      navigate("/app/products");
+                      navigate("/app/digital-products");
                     } else {
                       setSelectedProduct(product);
                     }
