@@ -1,6 +1,7 @@
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
-import { sendMail } from "../utils/mailer.server";
+import { sendMail, friendlyMailError } from "../utils/mailer.server";
+import { syncProductFilesMetafield, buildFilesPayload } from "../utils/metafield.server";
 
 export const action = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
@@ -23,13 +24,9 @@ export const action = async ({ request }) => {
 
     await prisma.productFile.deleteMany({ where: { id: fileId, shop } });
 
-    // Sync metafield for the product
+    // Sync metafield for the product — fire-and-forget, logs userErrors.
     const remaining = await prisma.productFile.findMany({ where: { shop, productId: file.productId }, orderBy: { createdAt: "desc" } });
-    const value = JSON.stringify(remaining.map((f) => ({ fileId: f.id, displayName: f.displayName || f.fileName, fileUrl: f.fileUrl })));
-    admin.graphql(
-      `mutation SyncMetafield($m: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $m) { metafields { id } userErrors { field message } } }`,
-      { variables: { m: [{ ownerId: file.productId, namespace: "pendora", key: "files", type: "json", value }] } }
-    ).catch(() => {});
+    void syncProductFilesMetafield(admin, file.productId, buildFilesPayload(remaining));
 
     return Response.json({ success: true, productRemoved: remaining.length === 0 });
   }
@@ -57,13 +54,9 @@ export const action = async ({ request }) => {
       },
     });
 
-    // Sync metafield
+    // Sync metafield — fire-and-forget, logs userErrors.
     const allFiles = await prisma.productFile.findMany({ where: { shop, productId: file.productId }, orderBy: { createdAt: "desc" } });
-    const value = JSON.stringify(allFiles.map((f) => ({ fileId: f.id, displayName: f.displayName || f.fileName, fileUrl: f.fileUrl })));
-    admin.graphql(
-      `mutation SyncMetafield($m: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $m) { metafields { id } userErrors { field message } } }`,
-      { variables: { m: [{ ownerId: file.productId, namespace: "pendora", key: "files", type: "json", value }] } }
-    ).catch(() => {});
+    void syncProductFilesMetafield(admin, file.productId, buildFilesPayload(allFiles));
 
     // Background: notify previous purchasers
     notifyPreviousPurchasers(shop, file, filename || file.fileName).catch((err) =>
@@ -157,7 +150,23 @@ async function notifyPreviousPurchasers(shop, oldFile, newFileName) {
       });
       console.log(`[Pendora] Update notification sent to ${customer.customerEmail} for replaced file ${newFileName}`);
     } catch (err) {
-      console.error(`[Pendora] Update notify failed for ${customer.customerEmail}:`, err.message);
+      console.error(`[Pendora] Update notify failed for ${customer.customerEmail}:`, err?.message ?? err);
+      // Record failure so the merchant can see it in the delivery log.
+      try {
+        await prisma.emailLog.create({
+          data: {
+            shop, orderId: customer.orderId, orderNumber: customer.orderNumber,
+            customerName: customer.customerName, customerEmail: customer.customerEmail,
+            productId: oldFile.productId, productTitle: oldFile.productTitle || "Digital Product",
+            fileIds: JSON.stringify([oldFile.id]),
+            status: "failed",
+            error: friendlyMailError(err),
+            tokenExpiry: new Date(Date.now() + 7 * 24 * 3600 * 1000),
+          },
+        });
+      } catch (logErr) {
+        console.error("[Pendora] Failed to write emailLog failed-row:", logErr?.message ?? logErr);
+      }
     }
   }
 }

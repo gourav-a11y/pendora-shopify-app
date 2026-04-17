@@ -179,20 +179,9 @@ export default function FilesPage() {
       <input ref={replaceInputRef} type="file" style={{ display: "none" }} onChange={handleReplaceFile} />
 
       {/* Header */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "20px" }}>
-        <div>
-          <div style={{ fontWeight: 800, fontSize: "20px" }}>Files</div>
-          <div style={{ fontSize: "13px", color: C.muted, marginTop: "3px" }}>{totalFiles} unique {totalFiles === 1 ? "file" : "files"} &middot; {totalSize} total</div>
-        </div>
-        {typeSizes.length > 0 && (
-          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-            {typeSizes.map(({ cat, size }) => (
-              <div key={cat} style={{ fontSize: "11px", color: C.muted, background: C.surface, border: `1px solid ${C.border}`, padding: "4px 10px", borderRadius: "6px" }}>
-                <span style={{ fontWeight: 700, textTransform: "capitalize" }}>{cat}</span> {size}
-              </div>
-            ))}
-          </div>
-        )}
+      <div style={{ marginBottom: "20px" }}>
+        <div style={{ fontWeight: 800, fontSize: "20px" }}>Files</div>
+        <div style={{ fontSize: "13px", color: C.muted, marginTop: "3px" }}>{totalFiles} unique {totalFiles === 1 ? "file" : "files"} &middot; {totalSize} total</div>
       </div>
 
       {feedback && <div style={{ padding: "10px 14px", background: feedback.isError ? C.dangerBg : C.successBg, border: `1px solid ${feedback.isError ? C.dangerBdr : C.successBdr}`, borderRadius: "10px", color: feedback.isError ? C.danger : C.success, fontSize: "13px", fontWeight: 600, marginBottom: "14px" }}>{feedback.msg}</div>}

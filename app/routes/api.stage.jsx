@@ -1,5 +1,6 @@
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { syncProductFilesMetafield, buildFilesPayload } from "../utils/metafield.server";
 
 const ALLOWED_EXTENSIONS = [
   ".pdf", ".zip", ".mp3", ".mp4", ".png", ".jpg", ".jpeg",
@@ -149,6 +150,7 @@ export const action = async ({ request }) => {
 
     // Background: register all resourceUrls with Shopify Files API, poll CDN URLs,
     // update DB, then sync metafield once.
+    // Top-level .catch on the IIFE guards against throws inside the outer catch block itself.
     ;(async () => {
       try {
         // Flatten: single files = 1 item, chunked files = N items (one per chunk).
@@ -214,6 +216,8 @@ export const action = async ({ request }) => {
         );
 
         // Write final URLs back to DB — one update per original file record.
+        // H2: if any chunk URL is missing (polling failed + fallback also null),
+        // mark the file as failed instead of persisting a corrupt chunk array.
         for (let fi = 0; fi < files.length; fi++) {
           const f = files[fi];
           const record = records[fi];
@@ -222,11 +226,19 @@ export const action = async ({ request }) => {
               .filter((item) => item.fileIndex === fi)
               .sort((a, b) => a.chunkIndex - b.chunkIndex)
               .map((item) => finalUrls[itemsToRegister.indexOf(item)]);
-            await prisma.productFile.update({ where: { id: record.id }, data: { chunkUrls: JSON.stringify(finalChunkUrls), status: "ready" } });
+            if (finalChunkUrls.some((u) => !u)) {
+              console.error(`[Pendora] Chunk URL missing for record ${record.id}; marking failed.`);
+              await prisma.productFile.update({ where: { id: record.id }, data: { status: "failed" } });
+            } else {
+              await prisma.productFile.update({ where: { id: record.id }, data: { chunkUrls: JSON.stringify(finalChunkUrls), status: "ready" } });
+            }
           } else {
             const idx = itemsToRegister.findIndex((item) => item.fileIndex === fi);
             if (idx >= 0 && finalUrls[idx]) {
               await prisma.productFile.update({ where: { id: record.id }, data: { fileUrl: finalUrls[idx], status: "ready" } });
+            } else {
+              console.error(`[Pendora] CDN URL missing for record ${record.id}; marking failed.`);
+              await prisma.productFile.update({ where: { id: record.id }, data: { status: "failed" } });
             }
           }
         }
@@ -236,17 +248,7 @@ export const action = async ({ request }) => {
           where: { shop: _shop, productId },
           orderBy: { createdAt: "desc" },
         });
-        const value = JSON.stringify(
-          allFiles.map((af) => ({
-            fileId: af.id,
-            displayName: af.displayName || af.fileName,
-            fileUrl: af.fileUrl || (af.chunkUrls ? JSON.parse(af.chunkUrls)[0] : null),
-          }))
-        );
-        await admin.graphql(
-          `mutation SetFilesMetafield($m: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $m) { metafields { id } userErrors { field message } } }`,
-          { variables: { m: [{ ownerId: productId, namespace: "pendora", key: "files", type: "json", value }] } }
-        );
+        await syncProductFilesMetafield(admin, productId, buildFilesPayload(allFiles));
       } catch (err) {
         console.error("[Pendora] Background CDN update failed:", err?.message ?? err);
         // Mark all records from this batch as failed
@@ -254,7 +256,7 @@ export const action = async ({ request }) => {
           try { await prisma.productFile.update({ where: { id: record.id }, data: { status: "failed" } }); } catch {}
         }
       }
-    })();
+    })().catch((err) => console.error("[Pendora] Background task top-level error:", err?.message ?? err));
 
     return Response.json({ saved });
   }

@@ -22,7 +22,7 @@ export const loader = async ({ request }) => {
       }
     `);
     const data = await response.json();
-    const products = data.data.products.edges.map((e) => e.node);
+    const products = (data?.data?.products?.edges ?? []).map((e) => e.node);
 
     // Fetch productIds that already have digital products
     const existing = await prisma.productFile.findMany({
@@ -118,6 +118,9 @@ export default function NewProductPage() {
       });
       const stageData = await stageRes.json();
       if (!stageRes.ok || stageData.error) throw new Error(stageData.error || "Failed to prepare upload.");
+      if (!Array.isArray(stageData.targets) || stageData.targets.length !== pendingFiles.length) {
+        throw new Error("Upload preparation incomplete. Please retry.");
+      }
 
       // Step 2: Upload each file DIRECTLY to Shopify CDN (browser → CDN, bypasses tunnel)
       const uploadedFiles = [];

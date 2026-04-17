@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useLoaderData, useFetcher } from "react-router";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -11,15 +11,62 @@ const C = {
   shadow: "0 1px 2px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.04)",
 };
 
+const LOGS_PER_PAGE = 10;
+
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  const [template, logs, allFiles] = await Promise.all([
+  const url = new URL(request.url);
+  const q = (url.searchParams.get("q") || "").trim();
+  const pageParam = parseInt(url.searchParams.get("page") || "1", 10);
+  const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
+
+  // Build where clause for search. SQLite `contains` is case-insensitive for ASCII (LIKE default).
+  let where = { shop };
+  if (q) {
+    // Find matching fileIds by file name / display name first.
+    const matchingFiles = await prisma.productFile.findMany({
+      where: {
+        shop,
+        OR: [
+          { fileName: { contains: q } },
+          { displayName: { contains: q } },
+        ],
+      },
+      select: { id: true },
+      take: 200,
+    });
+    const matchingFileIds = matchingFiles.map((f) => f.id);
+
+    const orClauses = [
+      { customerName: { contains: q } },
+      { customerEmail: { contains: q } },
+      { productTitle: { contains: q } },
+    ];
+    // fileIds is stored as JSON string like `["abc","def"]` — substring match on the id works.
+    for (const fid of matchingFileIds) {
+      orClauses.push({ fileIds: { contains: fid } });
+    }
+    where = { shop, OR: orClauses };
+  }
+
+  const [template, total, allFiles] = await Promise.all([
     prisma.emailTemplate.findUnique({ where: { shop } }),
-    prisma.emailLog.findMany({ where: { shop }, orderBy: { createdAt: "desc" }, take: 100 }),
+    prisma.emailLog.count({ where }),
     prisma.productFile.findMany({ where: { shop }, select: { id: true, fileName: true, displayName: true } }),
   ]);
+
+  const totalPages = Math.max(1, Math.ceil(total / LOGS_PER_PAGE));
+  const safePage = Math.min(page, totalPages);
+
+  const logs = await prisma.emailLog.findMany({
+    where,
+    orderBy: { createdAt: "desc" },
+    skip: (safePage - 1) * LOGS_PER_PAGE,
+    take: LOGS_PER_PAGE,
+  });
+
   const fileMap = {};
   for (const f of allFiles) fileMap[f.id] = f.displayName || f.fileName;
 
@@ -33,13 +80,23 @@ export const loader = async ({ request }) => {
     },
     logs: logs.map((l) => ({ id: l.id, orderNumber: l.orderNumber, customerName: l.customerName, customerEmail: l.customerEmail, productTitle: l.productTitle, fileIds: l.fileIds, status: l.status, error: l.error, createdAt: l.createdAt.toISOString() })),
     fileMap,
+    pagination: { page: safePage, totalPages, total, perPage: LOGS_PER_PAGE, q },
   };
 };
 
 export default function EmailPage() {
-  const { template: initTpl, logs: initLogs, fileMap } = useLoaderData();
+  const loaderData = useLoaderData();
+  const { template: initTpl } = loaderData;
   const tplFetcher = useFetcher();
   const resendFetcher = useFetcher();
+  // Reuses the same loader with ?page= and ?q= to fetch fresh pages/search results.
+  const logFetcher = useFetcher();
+
+  // Use fetcher data when it has loaded, otherwise fall back to loader data.
+  const logData = logFetcher.data || loaderData;
+  const initLogs = logData.logs;
+  const fileMap = logData.fileMap;
+  const pagination = logData.pagination;
 
   const [tab, setTab] = useState("template");
   const [resendPopup, setResendPopup] = useState(null); // { log, selectedFileIds: [...], customMessage: "" }
@@ -50,13 +107,60 @@ export default function EmailPage() {
   const [buttonColor, setButtonColor] = useState(initTpl.buttonColor);
   const [tplMsg, setTplMsg] = useState(null);
 
+  // Log search + page state. Debounce search 300ms so we don't hit the server on every keystroke.
+  const [searchInput, setSearchInput] = useState("");
+  const [searchDebounced, setSearchDebounced] = useState("");
+  const [logPage, setLogPage] = useState(1);
+
+  useEffect(() => {
+    const t = setTimeout(() => setSearchDebounced(searchInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  // When search changes, reset to page 1.
+  useEffect(() => { setLogPage(1); }, [searchDebounced]);
+
+  // Fetch new page / search from server. Skipped on initial render (loader already served page 1, q="").
+  const didInit = useRef(false);
+  useEffect(() => {
+    if (!didInit.current) { didInit.current = true; return; }
+    const params = new URLSearchParams();
+    params.set("page", String(logPage));
+    if (searchDebounced) params.set("q", searchDebounced);
+    logFetcher.load(`/app/email?${params.toString()}`);
+  }, [logPage, searchDebounced]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // After a successful resend, refresh the current log page so the new "resent" row appears.
+  useEffect(() => {
+    if (resendFetcher.state === "idle" && resendFetcher.data?.success) {
+      const params = new URLSearchParams();
+      params.set("page", String(logPage));
+      if (searchDebounced) params.set("q", searchDebounced);
+      logFetcher.load(`/app/email?${params.toString()}`);
+    }
+  }, [resendFetcher.state, resendFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => { const d = tplFetcher.data; if (!d) return; setTplMsg(d.success ? "Template saved!" : d.error); const t = setTimeout(() => setTplMsg(null), 4000); return () => clearTimeout(t); }, [tplFetcher.data]);
 
-  const saveTemplate = () => tplFetcher.submit(JSON.stringify({ subject, heading, body, footer, buttonColor }), { method: "POST", action: "/api/email-template", encType: "application/json" });
+  // Dirty check — compare current values to the loader's latest initTpl (which refreshes
+  // after a successful save via revalidation). If unchanged, Save Template is disabled.
+  const isTemplateDirty =
+    subject !== initTpl.subject ||
+    heading !== initTpl.heading ||
+    body !== initTpl.body ||
+    footer !== initTpl.footer ||
+    buttonColor !== initTpl.buttonColor;
+
+  const saveTemplate = () => {
+    if (!isTemplateDirty || tplFetcher.state !== "idle") return;
+    tplFetcher.submit(JSON.stringify({ subject, heading, body, footer, buttonColor }), { method: "POST", action: "/api/email-template", encType: "application/json" });
+  };
   const openResendPopup = (log) => {
     let fids = [];
     try { fids = JSON.parse(log.fileIds); } catch {}
-    setResendPopup({ log, selectedFileIds: [...fids], customMessage: "", customEmail: log.customerEmail });
+    // Only pre-select files that still exist in the DB; deleted ones can't be resent.
+    const availableFids = fids.filter((fid) => fileMap[fid]);
+    setResendPopup({ log, selectedFileIds: availableFids, customMessage: "", customEmail: log.customerEmail });
   };
   const confirmResend = () => {
     if (!resendPopup) return;
@@ -143,7 +247,13 @@ export default function EmailPage() {
                 </div>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                <button onClick={saveTemplate} disabled={tplFetcher.state !== "idle"} style={{ ...btnP, opacity: tplFetcher.state !== "idle" ? 0.6 : 1 }}>{tplFetcher.state !== "idle" ? "Saving..." : "Save Template"}</button>
+                <button
+                  onClick={saveTemplate}
+                  disabled={!isTemplateDirty || tplFetcher.state !== "idle"}
+                  style={{ ...btnP, opacity: (!isTemplateDirty || tplFetcher.state !== "idle") ? 0.5 : 1, cursor: (!isTemplateDirty || tplFetcher.state !== "idle") ? "not-allowed" : "pointer" }}
+                >
+                  {tplFetcher.state !== "idle" ? "Saving..." : "Save Template"}
+                </button>
                 {tplMsg && <span style={{ fontSize: "13px", color: tplFetcher.data?.success ? C.success : C.danger, fontWeight: 600 }}>{tplMsg}</span>}
               </div>
             </div>
@@ -160,15 +270,49 @@ export default function EmailPage() {
       {/* ── DELIVERY LOG TAB ── */}
       {tab === "log" && (
         <div>
+          {/* Search bar — always visible when the log tab is open (even if no results). */}
+          <div style={{ marginBottom: "14px", display: "flex", gap: "10px", alignItems: "center" }}>
+            <div style={{ position: "relative", flex: 1, maxWidth: "420px" }}>
+              <input
+                type="text"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                placeholder="Search by customer, email, product, or file name…"
+                style={{ ...inp, paddingLeft: "34px" }}
+              />
+              <span style={{ position: "absolute", left: "11px", top: "50%", transform: "translateY(-50%)", color: C.muted, fontSize: "14px", pointerEvents: "none" }}>⌕</span>
+              {searchInput && (
+                <button
+                  onClick={() => setSearchInput("")}
+                  style={{ position: "absolute", right: "8px", top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: C.muted, fontSize: "16px", padding: "0 4px", lineHeight: 1 }}
+                  aria-label="Clear search"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+            {logFetcher.state !== "idle" && (
+              <span style={{ fontSize: "12px", color: C.muted }}>Loading…</span>
+            )}
+          </div>
+
           {!initLogs.length ? (
             <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "60px 20px", textAlign: "center" }}>
               <div style={{ width: 56, height: 56, borderRadius: "14px", background: C.surface, border: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "24px", color: C.faint, boxShadow: C.shadow, marginBottom: "16px" }}>&#9993;</div>
-              <div style={{ fontSize: "18px", fontWeight: 700, marginBottom: "6px" }}>No emails sent yet</div>
-              <div style={{ fontSize: "14px", color: C.muted, maxWidth: "340px", lineHeight: 1.7 }}>When a customer places an order with digital products, an email with download links will be sent automatically.</div>
+              <div style={{ fontSize: "18px", fontWeight: 700, marginBottom: "6px" }}>
+                {searchDebounced ? "No matching emails" : "No emails sent yet"}
+              </div>
+              <div style={{ fontSize: "14px", color: C.muted, maxWidth: "340px", lineHeight: 1.7 }}>
+                {searchDebounced
+                  ? `No emails match "${searchDebounced}". Try a different search term.`
+                  : "When a customer places an order with digital products, an email with download links will be sent automatically."}
+              </div>
             </div>
           ) : (
-            <div style={{ ...card, padding: 0, overflow: "hidden" }}>
-              <div style={{ padding: "14px 20px", borderBottom: `1px solid ${C.border}`, fontWeight: 700, fontSize: "14px" }}>Recent Emails ({initLogs.length})</div>
+            <div style={{ ...card, padding: 0, overflow: "hidden", opacity: logFetcher.state !== "idle" ? 0.65 : 1, transition: "opacity 0.15s" }}>
+              <div style={{ padding: "14px 20px", borderBottom: `1px solid ${C.border}`, fontWeight: 700, fontSize: "14px" }}>
+                {searchDebounced ? `Matches: ${pagination?.total ?? initLogs.length}` : `Recent Emails (${pagination?.total ?? initLogs.length})`}
+              </div>
               {initLogs.map((log, idx) => {
                 const statusColor = log.status === "failed" ? C.danger : C.success;
                 const statusBg = log.status === "failed" ? C.dangerBg : C.successBg;
@@ -195,6 +339,31 @@ export default function EmailPage() {
             </div>
           )}
 
+          {/* Pagination controls */}
+          {pagination && pagination.totalPages > 1 && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: "14px", padding: "10px 4px" }}>
+              <div style={{ fontSize: "12px", color: C.muted }}>
+                Page {pagination.page} of {pagination.totalPages} · {pagination.total} {pagination.total === 1 ? "email" : "emails"}
+              </div>
+              <div style={{ display: "flex", gap: "6px" }}>
+                <button
+                  onClick={() => setLogPage((p) => Math.max(1, p - 1))}
+                  disabled={pagination.page <= 1 || logFetcher.state !== "idle"}
+                  style={{ ...btnS, padding: "6px 12px", fontSize: "12px", opacity: pagination.page <= 1 ? 0.4 : 1, cursor: pagination.page <= 1 ? "not-allowed" : "pointer" }}
+                >
+                  ← Prev
+                </button>
+                <button
+                  onClick={() => setLogPage((p) => Math.min(pagination.totalPages, p + 1))}
+                  disabled={pagination.page >= pagination.totalPages || logFetcher.state !== "idle"}
+                  style={{ ...btnS, padding: "6px 12px", fontSize: "12px", opacity: pagination.page >= pagination.totalPages ? 0.4 : 1, cursor: pagination.page >= pagination.totalPages ? "not-allowed" : "pointer" }}
+                >
+                  Next →
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Resend popup */}
           {resendPopup && (
             <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 999 }}>
@@ -211,26 +380,48 @@ export default function EmailPage() {
                   <div style={{ fontSize: "11px", color: C.faint, marginTop: "4px" }}>Change if the customer requested a different email address</div>
                 </div>
 
-                {/* File selection */}
-                {(() => { let fids = []; try { fids = JSON.parse(resendPopup.log.fileIds); } catch {} return fids.length > 0 ? (
-                  <div style={{ marginBottom: "16px" }}>
-                    <div style={{ fontSize: "12px", fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: "8px" }}>Select files to send</div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
-                      {fids.map((fid) => {
-                        const checked = resendPopup.selectedFileIds.includes(fid);
-                        const name = fileMap[fid] || fid;
-                        return (
-                          <label key={fid} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px", border: `1px solid ${checked ? C.navy : C.border}`, borderRadius: "8px", background: checked ? "rgba(27,43,68,0.03)" : C.surface, cursor: "pointer" }}>
-                            <input type="checkbox" checked={checked} onChange={() => {
-                              setResendPopup((p) => ({ ...p, selectedFileIds: checked ? p.selectedFileIds.filter((id) => id !== fid) : [...p.selectedFileIds, fid] }));
-                            }} style={{ width: 15, height: 15, accentColor: C.navy }} />
-                            <span style={{ fontSize: "13px", fontWeight: 500 }}>{name}</span>
-                          </label>
-                        );
-                      })}
+                {/* File selection — filter out files that have been deleted from the DB. */}
+                {(() => {
+                  let allFids = [];
+                  try { allFids = JSON.parse(resendPopup.log.fileIds); } catch {}
+                  const availableFids = allFids.filter((fid) => fileMap[fid]);
+                  const deletedCount = allFids.length - availableFids.length;
+
+                  if (allFids.length === 0) return null;
+
+                  if (availableFids.length === 0) {
+                    return (
+                      <div style={{ marginBottom: "16px", padding: "12px 14px", background: C.dangerBg, border: `1px solid ${C.dangerBdr}`, borderRadius: "8px", color: C.danger, fontSize: "13px" }}>
+                        All files from this email have been deleted. This email cannot be resent.
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div style={{ marginBottom: "16px" }}>
+                      <div style={{ fontSize: "12px", fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: "8px" }}>Select files to send</div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+                        {availableFids.map((fid) => {
+                          const checked = resendPopup.selectedFileIds.includes(fid);
+                          const name = fileMap[fid];
+                          return (
+                            <label key={fid} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px", border: `1px solid ${checked ? C.navy : C.border}`, borderRadius: "8px", background: checked ? "rgba(27,43,68,0.03)" : C.surface, cursor: "pointer" }}>
+                              <input type="checkbox" checked={checked} onChange={() => {
+                                setResendPopup((p) => ({ ...p, selectedFileIds: checked ? p.selectedFileIds.filter((id) => id !== fid) : [...p.selectedFileIds, fid] }));
+                              }} style={{ width: 15, height: 15, accentColor: C.navy }} />
+                              <span style={{ fontSize: "13px", fontWeight: 500 }}>{name}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                      {deletedCount > 0 && (
+                        <div style={{ fontSize: "11px", color: C.muted, marginTop: "8px", fontStyle: "italic" }}>
+                          {deletedCount} {deletedCount === 1 ? "file has" : "files have"} been deleted and cannot be resent.
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ) : null; })()}
+                  );
+                })()}
 
                 {/* Custom message */}
                 <div style={{ marginBottom: "18px" }}>

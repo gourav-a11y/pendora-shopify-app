@@ -40,26 +40,31 @@ Pendora is an embedded Shopify app that bridges the gap between Shopify's physic
 ### Merchant Dashboard — Digital Products (`/app`)
 - **Product Card List** — All digital products displayed as cards with file name, type badge, size, and edit/delete options.
 - **3-Step Wizard** — Create a digital product by choosing a Shopify product, uploading files (or reusing existing ones), and reviewing before saving.
+- **Infinite-Scroll Product Picker** — Wizard step 1 loads 20 Shopify products at a time with server-side pagination. Next 20 fetched automatically as the user scrolls close to the end — scales to stores with thousands of products without a performance hit.
+- **Server-Side Product Search** — Typing in the product search bar (300ms debounced) queries Shopify's admin GraphQL `products(query:)` directly, so matching is correct even across un-loaded pages.
 - **Use Existing Files** — Attach already-uploaded files to new products instantly — no re-upload needed.
 - **Detail View** — Click "Edit" on any product card to upload more files, preview, or delete.
-- **Shopify-Matched UI** — Navy/Amber color scheme matching Shopify admin sidebar aesthetics.
+- **Clean Single-Column Layout** — Digital Products heading, product count, and Add Product button sit together in a single row at the top of the dashboard.
 
 ### File Manager (`/app/files`)
 - **Deduplicated File List** — Same file used across multiple products shows as one entry with "Used in X products" count.
 - **Accordion Details** — Click "View Details" to expand file metadata (upload date, MIME type, assigned products).
 - **Search, Filter, Sort** — Search by name, filter by type (Documents, Images, Video, Audio, Archives), sort by date/name/size/type.
-- **Storage Summary** — Header shows total unique files, total size, and breakdown by type.
+- **Storage Summary** — Header shows total unique files and total size.
 - **Smart Delete** — Single product: direct confirm. Multiple products: product picker popup with warning about impact.
-- **Replace File** — Upload replacement file for a specific product. Previous purchasers of that product are automatically notified via email with fresh download links.
+- **Replace File** — Upload replacement file for a specific product. Previous purchasers of that product are automatically notified via email with fresh download links. If the update email fails, a `failed` row is recorded in the delivery log with a friendly error message.
 - **Type-Specific Icons** — Different icons for documents, images, video, audio, and archives.
 
 ### Email & Deliverables (`/app/email`)
 - **Automated Order Emails** — When an order is marked as paid (`orders/paid` webhook), customers receive a download email automatically.
 - **Email Template Editor** — Merchants customize subject, greeting, body, footer, and button color with live preview.
+- **Smart Save Button** — The "Save Template" button is disabled until the user actually changes something. Re-enables after any edit; greys out again after a successful save.
 - **Dynamic Variables** — `{{customer_name}}`, `{{order_number}}`, `{{shop_name}}` auto-replaced at send time.
-- **Delivery Log** — List of all sent/failed/resent emails with customer name, product, order number, date, and status badges.
-- **Smart Resend** — Click "Resend" to open a popup with: custom email address (for customer requests), file selection checkboxes, and optional custom message.
+- **Paginated Delivery Log** — 10 emails per page with Prev/Next controls. Server-side pagination via Prisma `skip`/`take` + `count` — scales to tens of thousands of logs without loading them all.
+- **Delivery Log Search** — Single search bar matches against customer name, customer email, product title, AND file names (display name or original filename). Debounced 300 ms, resets to page 1 on each new query, clears with a ✕ button.
+- **Smart Resend** — Click "Resend" to open a popup with: custom email address (for customer requests), file selection checkboxes, and optional custom message. Deleted files are hidden from the list with an inline note — the popup never shows raw file IDs.
 - **Resent Tag** — Resent emails show a "RESENT" badge in both the email itself and the delivery log.
+- **Friendly Error Messages** — SMTP failures (wrong credentials, timeouts, blocked sender, etc.) are translated into plain-English messages both in the UI toast and in the delivery-log `error` column. Raw SMTP codes never leak to the merchant.
 - **Custom SMTP Mailer** — Zero third-party email packages. Pure Node.js `net`/`tls` SMTP client connecting to Gmail SMTP.
 
 ### Customer Experience
@@ -71,10 +76,13 @@ Pendora is an embedded Shopify app that bridges the gap between Shopify's physic
 ### Technical
 - **Chunked Parallel Uploads** — Files over 50 MB are split into 25 MB chunks uploaded via 6 concurrent connections (up to 5 GB supported).
 - **Just-in-Time Staging** — Each chunk gets a fresh pre-signed URL immediately before upload.
-- **Auto-Retry with Resume** — Failed chunks retry up to 3 times. Resume cache in localStorage survives page refreshes.
-- **Chunked Downloads** — Large files streamed back via `ReadableStream` concatenation.
+- **Auto-Retry with Resume** — Failed chunks retry up to 3 times. Resume cache in localStorage is shape-validated before use and survives page refreshes.
+- **Upload Integrity Checks** — Stage response is validated for target-count parity; chunk arrays are checked for holes before the save call. A partial upload is rejected with a clear error instead of being silently corrupted.
+- **Chunked Downloads with Retry** — Large files streamed back via `ReadableStream` concatenation. Each chunk fetch retries up to 3 times (500 ms backoff) before bytes hit the wire — transient CDN 5xx no longer breaks downloads.
 - **Shopify CDN Storage** — Files uploaded directly to Shopify's CDN; app server never handles raw file bytes.
-- **Metafield Sync** — File metadata synced to `pendora.files` product metafields after every upload, delete, or replace.
+- **Centralized Metafield Sync** — Single `syncProductFilesMetafield` helper owns all writes to `pendora.files` product metafields. `userErrors` from the GraphQL response are logged (no longer silently swallowed) so drift between DB and checkout extension is observable.
+- **Corruption-Safe Chunk Parsing** — All `JSON.parse(chunkUrls)` paths are wrapped in try/catch with a safe null fallback, so a malformed DB row can't crash a background sync task.
+- **Defensive Checkout Extension** — Metafield parsing filters out entries missing `fileId` and tolerates `null` metafield values, so a stale or partial sync never blanks the thank-you page.
 - **GDPR Compliance** — Handles `customers/data_request`, `customers/redact`, and `shop/redact` webhooks.
 
 ---
@@ -179,8 +187,9 @@ pendora-test/
 │   │
 │   ├── utils/
 │   │   ├── token.server.js                 # HMAC tokens (1h dashboard + 7d email)
-│   │   ├── mailer.server.js                # Custom SMTP client (net/tls)
+│   │   ├── mailer.server.js                # Custom SMTP client (net/tls) + friendlyMailError
 │   │   ├── email.server.js                 # Email engine (template render + send)
+│   │   ├── metafield.server.js             # Central pendora.files metafield sync + buildFilesPayload
 │   │   └── crypto.server.js                # AES-256-GCM encrypt/decrypt
 │   │
 │   ├── shopify.server.js                   # Shopify app config + auth
@@ -232,15 +241,36 @@ Save/load merchant's email template (subject, heading, body, footer, button colo
 
 ### `POST /api/email-resend`
 
-Resend email with options: custom recipient email, specific file selection, custom message.
+Resend email with options: custom recipient email, specific file selection, custom message. Errors are returned through `friendlyMailError` — the client receives a human-readable message instead of raw SMTP output.
 
 ### `GET /api/files/:fileId?token=<token>`
 
-Token-verified file preview/download. Token expires in 1 hour. Checks `downloadEnabled` flag.
+Token-verified file preview/download. Token expires in 1 hour. Checks `downloadEnabled` flag. Chunked files stream through with per-chunk fetch retry; error responses are generic (no `err.message` leakage).
 
 ### `GET /apps/pendora/api/download/:fileId` *(App Proxy)*
 
-Customer download endpoint. HMAC signature verified by Shopify proxy + shop ownership check + downloadEnabled check + CDN URL validation.
+Customer download endpoint. HMAC signature verified by Shopify proxy + shop ownership check + `downloadEnabled` check + CDN URL validation. Per-chunk fetch retry (3× with 500ms backoff) before any bytes are streamed, so transient CDN 5xx no longer aborts the download.
+
+### `GET /api/products`
+
+Cursor-paginated Shopify products list (used by the wizard's product picker).
+
+| Query param | Default | Max | Notes |
+|---|---|---|---|
+| `first` | 20 | 50 | Page size |
+| `after` | — | — | Cursor from previous response's `pageInfo.endCursor` |
+| `search` | — | — | Free-text query passed through to Shopify admin GraphQL |
+
+**Response:**
+```json
+{ "products": [ { "id": "gid://...", "title": "...", "status": "...", "featuredImage": { "url": "..." } } ], "pageInfo": { "hasNextPage": true, "endCursor": "..." } }
+```
+
+The default call (`first=20`, no cursor, no search) is cached per-shop for 5 minutes. Paginated and search calls bypass the cache.
+
+### `GET /app/email?page=<n>&q=<text>`
+
+Same route loader that renders the Email page also serves paginated/filtered delivery-log data via `useFetcher.load(...)`. Returns `{ template, logs, fileMap, pagination: { page, totalPages, total, perPage, q } }`. Search matches against customer name, customer email, product title, and file names (joined through the ProductFile table).
 
 ---
 
@@ -485,8 +515,8 @@ npx prisma db push
 **`orders/paid webhook not firing`**
 Ensure protected customer data access is approved in Partner Dashboard. Restart dev server after TOML changes.
 
-**`SMTP 535: Username and Password not accepted`**
-Use a Gmail App Password, not your regular password. Generate at: Google Account → Security → 2-Step Verification → App passwords.
+**"Email service is not configured correctly (authentication failed)"** *(in the UI / delivery log)*
+Server-side this is a `SMTP 535: Username and Password not accepted` — the raw error is in `console.error` for the developer, but `friendlyMailError()` in [app/utils/mailer.server.js](app/utils/mailer.server.js) translates it for the merchant. Fix: use a Gmail App Password, not your regular password. Generate at: Google Account → Security → 2-Step Verification → App passwords.
 
 **`Connection timeout to smtp.gmail.com`**
 Ensure port 587 is not blocked by your firewall/network. Test with: `telnet smtp.gmail.com 587`
@@ -496,6 +526,27 @@ Check spam folder. Add SPF record to your sending domain's DNS for better delive
 
 **Download links returning 401**
 Dashboard tokens expire in 1 hour. Email tokens expire in 7 days. For customer downloads, always use the App Proxy URL.
+
+---
+
+## Recent Changes
+
+### Scale & UX
+- Wizard product picker → server-side cursor pagination (20 at a time, infinite scroll, ~5 rows early preload).
+- Server-side product search via Shopify admin GraphQL `products(query:)`.
+- Delivery log → server-side pagination (10/page) + multi-field search (customer name / email / product / file name).
+- Dashboard navbar removed; Add Product button lives next to the Digital Products heading.
+- Files page: redundant per-type size badges removed from the header.
+
+### Reliability & Safety
+- New `syncProductFilesMetafield` helper centralizes all seven metafield-sync call sites. `userErrors` are now logged instead of silently swallowed by `.catch(() => {})`.
+- `JSON.parse(chunkUrls)` is safe everywhere — corrupt DB rows can no longer crash background sync tasks.
+- Download endpoints retry chunk fetches 3× with 500 ms backoff before the response stream starts. Internal error text no longer leaks to clients.
+- `friendlyMailError` maps raw SMTP failures (535, 534, 550, timeouts, ECONNREFUSED, etc.) to merchant-friendly strings in both the UI and `emailLog.error`.
+- Stage upload response is validated for target-count parity; chunked uploads detect holes before saving.
+- Checkout extension defensively parses metafield values — null values and entries missing `fileId` are dropped instead of crashing the thank-you page.
+- Resend popup filters out deleted files and shows a clear message if every file from an email has been deleted.
+- "Save Template" button is properly dirty-tracked — greys out when nothing has changed and re-enables after any edit.
 
 ---
 

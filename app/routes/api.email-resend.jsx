@@ -1,6 +1,6 @@
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
-import { sendMail } from "../utils/mailer.server";
+import { sendMail, friendlyMailError } from "../utils/mailer.server";
 
 function formatFileSize(bytes) {
   if (!bytes) return "";
@@ -107,6 +107,7 @@ export const action = async ({ request }) => {
 
     return Response.json({ success: true });
   } catch (err) {
-    return Response.json({ error: `Send failed: ${err.message}` }, { status: 500 });
+    console.error("[Pendora] Email resend failed:", err?.message ?? err);
+    return Response.json({ error: friendlyMailError(err) }, { status: 500 });
   }
 };

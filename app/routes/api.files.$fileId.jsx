@@ -1,6 +1,23 @@
 import { verifyDownloadToken } from "../utils/token.server";
 import prisma from "../db.server";
 
+// Retry a CDN fetch a few times before giving up — Shopify occasionally 503s.
+// Only safe to call BEFORE any bytes have been enqueued on the response stream.
+async function fetchWithRetry(url, attempts = 3, delayMs = 500) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return res;
+      lastErr = new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      lastErr = err;
+    }
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  throw lastErr ?? new Error("Fetch failed");
+}
+
 /**
  * Public download endpoint — no Shopify auth required.
  * Access is controlled via a short-lived signed token.
@@ -69,8 +86,14 @@ export const loader = async ({ request, params }) => {
       async start(controller) {
         try {
           for (const url of chunkUrls) {
-            const res = await fetch(url);
-            if (!res.ok) { controller.error(new Error(`Chunk fetch failed (${res.status})`)); return; }
+            // Retry the initial fetch (not mid-stream — mid-stream errors must abort).
+            let res;
+            try {
+              res = await fetchWithRetry(url, 3, 500);
+            } catch (err) {
+              controller.error(new Error(`Chunk fetch failed: ${err?.message ?? err}`));
+              return;
+            }
             const reader = res.body.getReader();
             while (true) {
               const { done, value } = await reader.read();
@@ -84,6 +107,7 @@ export const loader = async ({ request, params }) => {
     });
     return new Response(stream, { status: 200, headers });
   } catch (err) {
-    return new Response("Download failed: " + err.message, { status: 500 });
+    console.error("[Pendora] /api/files download error:", err?.message ?? err);
+    return new Response("Download failed. Please try again.", { status: 500 });
   }
 };

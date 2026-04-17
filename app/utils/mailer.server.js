@@ -7,6 +7,42 @@ import { connect as tlsConnect } from "tls";
  * Connects to any SMTP relay (Gmail, Outlook, etc.) with STARTTLS + AUTH.
  */
 
+/**
+ * Convert raw SMTP/network errors into user-facing strings.
+ * Safe to display in the admin UI or store in emailLog.error.
+ * Original error remains in server logs via console.error at the call site.
+ */
+export function friendlyMailError(err) {
+  const raw = (err && (err.message || err.toString())) || "";
+  const lc = raw.toLowerCase();
+
+  if (lc.includes("mail_user and mail_pass must be set")) {
+    return "Email is not configured on the server. Please contact support.";
+  }
+  if (raw.includes("535") || lc.includes("username and password not accepted") || lc.includes("badcredentials")) {
+    return "Email service is not configured correctly (authentication failed). Please contact support.";
+  }
+  if (raw.includes("534")) {
+    return "Email service requires an app-specific password. Please contact support.";
+  }
+  if (raw.includes("550") || raw.includes("5.1.1") || lc.includes("recipient address rejected") || lc.includes("user unknown")) {
+    return "The recipient email address was rejected by the mail server.";
+  }
+  if (raw.includes("553") || lc.includes("sender address rejected")) {
+    return "The sender email address was rejected by the mail server.";
+  }
+  if (raw.includes("554") || lc.includes("transaction failed") || lc.includes("spam")) {
+    return "The email was rejected by the mail server. Please try again later.";
+  }
+  if (lc.includes("timeout") || lc.includes("timed out")) {
+    return "Email service timed out. Please try again in a moment.";
+  }
+  if (lc.includes("econnrefused") || lc.includes("enotfound") || lc.includes("econnreset")) {
+    return "Could not reach the email server. Please try again.";
+  }
+  return "Could not send email. Please try again or contact support.";
+}
+
 function smtpCommand(socket, command) {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error(`SMTP timeout on: ${command || "connect"}`)), 20000);

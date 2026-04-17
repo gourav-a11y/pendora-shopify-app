@@ -1,5 +1,6 @@
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { syncProductFilesMetafield, buildFilesPayload } from "../utils/metafield.server";
 
 /**
  * Clone an existing file to a new product — instant, no re-upload.
@@ -49,22 +50,12 @@ export const action = async ({ request }) => {
     )
   );
 
-  // Sync metafield for the new product
+  // Sync metafield for the new product — fire-and-forget, logs userErrors.
   const allFiles = await prisma.productFile.findMany({
     where: { shop, productId },
     orderBy: { createdAt: "desc" },
   });
-  const value = JSON.stringify(
-    allFiles.map((af) => ({
-      fileId: af.id,
-      displayName: af.displayName || af.fileName,
-      fileUrl: af.fileUrl || (af.chunkUrls ? JSON.parse(af.chunkUrls)[0] : null),
-    }))
-  );
-  admin.graphql(
-    `mutation SyncMetafield($m: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $m) { metafields { id } userErrors { field message } } }`,
-    { variables: { m: [{ ownerId: productId, namespace: "pendora", key: "files", type: "json", value }] } }
-  ).catch(() => {});
+  void syncProductFilesMetafield(admin, productId, buildFilesPayload(allFiles));
 
   return Response.json({ saved: cloned.map((c) => ({ fileId: c.id, fileName: c.fileName })) });
 };

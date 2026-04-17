@@ -33,12 +33,16 @@ function getFileExt(name) {
 
 function ThankYouDownloads() {
   const { myshopifyDomain } = useShop();
-  const metafields = useAppMetafields({ namespace: "pendora", key: "files" });
+  const metafields = useAppMetafields({ namespace: "pendora", key: "files" }) || [];
 
   const allFiles = metafields.flatMap((entry) => {
+    const raw = entry?.metafield?.value;
+    if (!raw) return [];
     try {
-      const files = JSON.parse(entry.metafield.value);
-      return Array.isArray(files) ? files : [];
+      const files = JSON.parse(raw);
+      if (!Array.isArray(files)) return [];
+      // Drop malformed entries so we never render a button with an undefined fileId.
+      return files.filter((f) => f && typeof f.fileId === "string" && f.fileId);
     } catch {
       return [];
     }

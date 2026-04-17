@@ -4,6 +4,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { generateDownloadToken } from "../utils/token.server";
+import { syncProductFilesMetafield, buildFilesPayload } from "../utils/metafield.server";
 
 function formatFileSize(bytes) {
   if (!bytes) return "–";
@@ -70,9 +71,12 @@ function loadResumeCache(key) {
     const raw = localStorage.getItem(key);
     if (!raw) return null;
     const data = JSON.parse(raw);
-    if (Date.now() - data.ts > RESUME_MAX_AGE) { localStorage.removeItem(key); return null; }
-    return data.done || null;
-  } catch { return null; }
+    if (!data || typeof data !== "object") { localStorage.removeItem(key); return null; }
+    if (typeof data.ts !== "number" || Date.now() - data.ts > RESUME_MAX_AGE) { localStorage.removeItem(key); return null; }
+    const done = data.done;
+    if (!done || typeof done !== "object" || Array.isArray(done)) { localStorage.removeItem(key); return null; }
+    return done;
+  } catch { try { localStorage.removeItem(key); } catch {} return null; }
 }
 function saveResumeCache(key, files, done) {
   try { localStorage.setItem(key, JSON.stringify({ ts: Date.now(), files: files.map(f => ({ name: f.name, size: f.size })), done })); } catch {}
@@ -185,15 +189,11 @@ export const loader = async ({ request }) => {
   }
 
   // Fire-and-forget metafield sync so checkout extension stays up to date.
-  // Not awaited — never blocks the response.
+  // Not awaited — never blocks the response. Helper logs userErrors internally.
   const uniqueProductIds = [...new Set(filesResult.map((f) => f.productId))];
   for (const pid of uniqueProductIds) {
     const pFiles = filesResult.filter((f) => f.productId === pid);
-    const value = JSON.stringify(pFiles.map((f) => ({ fileId: f.id, displayName: f.displayName || f.fileName, fileUrl: f.fileUrl })));
-    admin.graphql(
-      `mutation SyncMetafield($m: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $m) { metafields { id } userErrors { field message } } }`,
-      { variables: { m: [{ ownerId: pid, namespace: "pendora", key: "files", type: "json", value }] } }
-    ).catch((e) => console.error("[Pendora] Metafield sync failed:", e?.message ?? e));
+    void syncProductFilesMetafield(admin, pid, buildFilesPayload(pFiles));
   }
 
   // shopifyProducts are NOT loaded here — they are lazy-loaded by the client
@@ -220,11 +220,7 @@ export const action = async ({ request }) => {
       // Avoids SQLite lock conflicts with the background CDN polling process.
       await prisma.productFile.deleteMany({ where: { id: fileId, shop } });
       const remaining = await prisma.productFile.findMany({ where: { shop, productId: file.productId }, orderBy: { createdAt: "desc" } });
-      const value = JSON.stringify(remaining.map((f) => ({ fileId: f.id, displayName: f.displayName || f.fileName, fileUrl: f.fileUrl })));
-      admin.graphql(
-        `mutation SyncMetafield($m: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $m) { metafields { id } userErrors { field message } } }`,
-        { variables: { m: [{ ownerId: file.productId, namespace: "pendora", key: "files", type: "json", value }] } }
-      ).catch(() => {});
+      void syncProductFilesMetafield(admin, file.productId, buildFilesPayload(remaining));
       return { success: "File deleted." };
     }
 
@@ -232,11 +228,8 @@ export const action = async ({ request }) => {
       const productId = formData.get("productId");
       if (!productId) return { error: "No product ID provided." };
       await prisma.productFile.deleteMany({ where: { shop, productId } });
-      // Clear metafield fire-and-forget
-      admin.graphql(
-        `mutation SyncMetafield($m: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $m) { metafields { id } userErrors { field message } } }`,
-        { variables: { m: [{ ownerId: productId, namespace: "pendora", key: "files", type: "json", value: "[]" }] } }
-      ).catch(() => {});
+      // Clear metafield fire-and-forget — empty file list.
+      void syncProductFilesMetafield(admin, productId, []);
       return { success: "Product deleted." };
     }
 
@@ -472,6 +465,9 @@ export default function HomePage() {
         });
         await withConcurrency(uploadTasks, MAX_PARALLEL);
         const resourceUrls = parts.map((_, i) => singleDonePartsRef.current[i]);
+        if (resourceUrls.some((u) => !u)) {
+          throw new Error("Upload incomplete — some parts failed. Please retry.");
+        }
         setUploadProgress(100);
         console.log(`[Pendora] All ${resourceUrls.length} parts uploaded`);
         const svr = await fetch("/api/stage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent: "save", files: [{ chunkUrls: resourceUrls, filename: file.name, mimeType: file.type || "application/octet-stream", fileSize: file.size, displayName: displayName || file.name }], productId: selected.productId, productTitle: selected.productTitle, downloadEnabled: true }) });
@@ -651,6 +647,9 @@ export default function HomePage() {
         console.log(`[Pendora] Round ${Math.floor(roundStart / MAX_PARALLEL) + 1} done (parts ${roundStart + 1}-${Math.min(roundStart + MAX_PARALLEL, allParts.length)})`);
       }
       const resourceUrls = allParts.map((_, i) => wDonePartsRef.current[i]);
+      if (resourceUrls.some((u) => !u)) {
+        throw new Error("Upload incomplete — some parts failed. Please retry.");
+      }
       setWProgressText("100%");
       console.log(`[Pendora] Wizard: all ${resourceUrls.length} parts uploaded`);
 
@@ -695,17 +694,112 @@ export default function HomePage() {
     finally { setWSubmitting(false); setIsUploading(false); setUploadingProductId(null); setWProgressText(""); }
   };
 
-  // Build shopifyProducts from the lazy-fetched /api/products data.
+  // Build shopifyProducts from paginated /api/products data.
   // alreadyCreated is derived from digitalProducts so it's always fresh after revalidations.
   const existingIds = new Set(digitalProducts.map((p) => p.productId));
-  const shopifyProductsRaw = shopifyFetcher.data?.products ?? [];
-  const shopifyLoading = mode === "create" && shopifyFetcher.state !== "idle";
 
-  // Override alreadyCreated for products the user just deleted — don't wait for loader revalidation
-  const filteredShopify = shopifyProductsRaw
+  // Paginated state — initial page seeded from shopifyFetcher, subsequent pages and
+  // search via direct fetch(). Single object so all fields move atomically.
+  const [wProductsState, setWProductsState] = useState({
+    list: [],
+    cursor: null,
+    hasMore: false,
+    loading: false,
+    initialized: false,
+    searchApplied: "",
+  });
+  const wProductsFetchIdRef = useRef(0);
+  const [wSearchDebounced, setWSearchDebounced] = useState("");
+
+  // Debounce search input (300ms) to avoid firing on every keystroke.
+  useEffect(() => {
+    const h = setTimeout(() => setWSearchDebounced(wSearch.trim()), 300);
+    return () => clearTimeout(h);
+  }, [wSearch]);
+
+  // Seed initial list from the prefetched shopifyFetcher once the data actually arrives.
+  // NOTE: checking state === "idle" is NOT enough — the fetcher starts as idle BEFORE
+  // the prefetch fires, so we'd initialize with empty data and short-circuit forever.
+  // Wait for `data` to be defined (means the fetch completed).
+  useEffect(() => {
+    if (wProductsState.initialized) return;
+    if (shopifyFetcher.data === undefined) return;
+    const data = shopifyFetcher.data;
+    setWProductsState({
+      list: data.products || [],
+      cursor: data.pageInfo?.endCursor ?? null,
+      hasMore: !!data.pageInfo?.hasNextPage,
+      loading: false,
+      initialized: true,
+      searchApplied: "",
+    });
+  }, [shopifyFetcher.data, wProductsState.initialized]);
+
+  // When debounced search changes (after initial load), reset list and refetch from the server.
+  useEffect(() => {
+    if (!wProductsState.initialized) return;
+    if (wSearchDebounced === wProductsState.searchApplied) return;
+    const fetchId = ++wProductsFetchIdRef.current;
+    setWProductsState((s) => ({ ...s, loading: true }));
+    const params = new URLSearchParams();
+    params.set("first", "20");
+    if (wSearchDebounced) params.set("search", wSearchDebounced);
+    fetch(`/api/products?${params.toString()}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (fetchId !== wProductsFetchIdRef.current) return; // stale — ignore
+        setWProductsState({
+          list: data.products || [],
+          cursor: data.pageInfo?.endCursor ?? null,
+          hasMore: !!data.pageInfo?.hasNextPage,
+          loading: false,
+          initialized: true,
+          searchApplied: wSearchDebounced,
+        });
+      })
+      .catch(() => {
+        if (fetchId !== wProductsFetchIdRef.current) return;
+        setWProductsState((s) => ({ ...s, loading: false }));
+      });
+  }, [wSearchDebounced, wProductsState.initialized, wProductsState.searchApplied]);
+
+  // Load next page (called from the Wizard sentinel when it enters viewport).
+  const loadMoreProducts = () => {
+    setWProductsState((s) => {
+      if (s.loading || !s.hasMore || !s.cursor) return s;
+      const fetchId = ++wProductsFetchIdRef.current;
+      const params = new URLSearchParams();
+      params.set("first", "20");
+      params.set("after", s.cursor);
+      if (s.searchApplied) params.set("search", s.searchApplied);
+      fetch(`/api/products?${params.toString()}`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (fetchId !== wProductsFetchIdRef.current) return;
+          setWProductsState((cur) => ({
+            ...cur,
+            list: [...cur.list, ...(data.products || [])],
+            cursor: data.pageInfo?.endCursor ?? null,
+            hasMore: !!data.pageInfo?.hasNextPage,
+            loading: false,
+          }));
+        })
+        .catch(() => {
+          if (fetchId !== wProductsFetchIdRef.current) return;
+          setWProductsState((cur) => ({ ...cur, loading: false }));
+        });
+      return { ...s, loading: true };
+    });
+  };
+
+  // Apply client-side overrides (existing + deleted) on top of the paginated list.
+  const filteredShopify = wProductsState.list
     .map((p) => ({ ...p, alreadyCreated: existingIds.has(p.id) }))
-    .filter((p) => p.title.toLowerCase().includes(wSearch.toLowerCase()))
     .map((p) => deletedProductIds.has(p.id) ? { ...p, alreadyCreated: false } : p);
+
+  // "Loading" for the wizard = we don't have the first page yet. Load-more doesn't dim the list.
+  const shopifyLoading = mode === "create" && !wProductsState.initialized;
+  const shopifyLoadingMore = wProductsState.initialized && wProductsState.loading;
 
   // ── Style helpers ──────────────────────────────────────────────────────────
   const formatEta = (secs) => {
@@ -726,32 +820,9 @@ export default function HomePage() {
     ghost:     { border: `1px solid ${t.border}`, borderRadius: "8px", cursor: "pointer", fontWeight: 600, fontSize: "13px", display: "inline-flex", alignItems: "center", gap: "6px", padding: "8px 14px", background: "transparent", color: t.muted, transition: TR },
   };
 
-  // ── Header bar ─────────────────────────────────────────────────────────────
-  const renderHeader = () => (
-    <div style={{ background: t.headerBg, padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0, transition: TR }}>
-      <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-        <div style={{ width: 34, height: 34, borderRadius: "9px", background: "rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>
-          {Ic.spark(18)}
-        </div>
-        <div>
-          <div style={{ color: "#fff", fontWeight: 800, fontSize: "17px", letterSpacing: "-0.2px", lineHeight: 1.1 }}>Pendora</div>
-          <div style={{ color: "rgba(255,255,255,0.65)", fontSize: "10px", fontWeight: 500, letterSpacing: "0.6px" }}>DIGITAL PRODUCTS</div>
-        </div>
-      </div>
-      {mode !== "create" && (
-        <button
-          onClick={isUploading ? undefined : openCreate}
-          style={{ padding: "7px 16px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.3)", background: "rgba(255,255,255,0.15)", color: "#fff", cursor: isUploading ? "not-allowed" : "pointer", fontSize: "13px", fontWeight: 600, display: "flex", alignItems: "center", gap: "6px", opacity: isUploading ? 0.5 : 1, transition: "all 0.15s" }}>
-          {Ic.plus(14)} Add Product
-        </button>
-      )}
-    </div>
-  );
-
-  // ── Outer shell ───────────���─────────��──────────────────────────────────────
+  // ── Outer shell ───────────────────────────────────────────────────────────
   const wrap = (inner) => (
     <div style={{ position: "fixed", inset: 0, background: t.bg, color: t.text, display: "flex", flexDirection: "column", overflow: "hidden", fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", transition: TR }}>
-      {renderHeader()}
       {inner}
     </div>
   );
@@ -776,6 +847,7 @@ export default function HomePage() {
               wExisting={wExisting} setWExisting={setWExisting} allExistingFiles={allExistingFiles}
               wSubmitting={wSubmitting} wError={wError} wCanRetry={wCanRetry} wDonePartsRef={wDonePartsRef} wProgressText={wProgressText}
               filteredShopify={filteredShopify} shopifyLoading={shopifyLoading}
+              shopifyLoadingMore={shopifyLoadingMore} loadMoreProducts={loadMoreProducts}
               wizardFileInputRef={wizardFileInputRef} wizardPickFiles={wizardPickFiles}
               handleWizardSubmit={handleWizardSubmit} onCancel={() => setMode("view")} />
           </div>
@@ -868,9 +940,17 @@ export default function HomePage() {
 
         {mode === "view" && visibleProducts.length > 0 && !showSkeleton(isRevalidating, selected) && (
           <div style={{ padding: "24px 28px" }}>
-            <div style={{ marginBottom: "18px" }}>
-              <div style={{ fontWeight: 700, fontSize: "17px", color: t.text }}>Digital Products</div>
-              <div style={{ fontSize: "13px", color: t.muted, marginTop: "3px" }}>{visibleProducts.length} {visibleProducts.length === 1 ? "product" : "products"}</div>
+            <div style={{ marginBottom: "18px", display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px" }}>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: "17px", color: t.text }}>Digital Products</div>
+                <div style={{ fontSize: "13px", color: t.muted, marginTop: "3px" }}>{visibleProducts.length} {visibleProducts.length === 1 ? "product" : "products"}</div>
+              </div>
+              <button
+                onClick={isUploading ? undefined : openCreate}
+                disabled={isUploading}
+                style={{ ...B.primary, padding: "10px 18px", fontSize: "13px", opacity: isUploading ? 0.5 : 1, cursor: isUploading ? "not-allowed" : "pointer", flexShrink: 0 }}>
+                {Ic.plus(14)} Add Product
+              </button>
             </div>
             {productDeleteError && <div style={{ padding: "10px 14px", background: t.dangerBg, border: `1px solid ${t.dangerBdr}`, borderRadius: "10px", color: t.danger, fontSize: "13px", marginBottom: "14px" }}>{productDeleteError}</div>}
             <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
@@ -1040,7 +1120,24 @@ export default function HomePage() {
 
 // ─── Wizard ───────────────────────────────────────────────────────────────────
 
-function Wizard({ inp, Ic, t, step, setStep, search, setSearch, wProduct, setWProduct, wFiles, setWFiles, wExisting, setWExisting, allExistingFiles, wSubmitting, wError, wCanRetry, wDonePartsRef, wProgressText, filteredShopify, shopifyLoading, wizardFileInputRef, wizardPickFiles, handleWizardSubmit, onCancel }) {
+function Wizard({ inp, Ic, t, step, setStep, search, setSearch, wProduct, setWProduct, wFiles, setWFiles, wExisting, setWExisting, allExistingFiles, wSubmitting, wError, wCanRetry, wDonePartsRef, wProgressText, filteredShopify, shopifyLoading, shopifyLoadingMore, loadMoreProducts, wizardFileInputRef, wizardPickFiles, handleWizardSubmit, onCancel }) {
+  // Sentinel observer — fires when user scrolls near the end of the list.
+  // rootMargin 400px = roughly 5 product rows (~75px each) before the sentinel enters viewport,
+  // so the next batch starts fetching while the user is still viewing products 15-ish of 20.
+  const sentinelRef = useRef(null);
+  useEffect(() => {
+    if (step !== 1) return;
+    if (!sentinelRef.current) return;
+    if (!loadMoreProducts) return;
+    const el = sentinelRef.current;
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) loadMoreProducts();
+      }
+    }, { rootMargin: "400px" });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [step, filteredShopify.length, loadMoreProducts]);
   const btnSecondary = { padding: "11px 24px", borderRadius: "10px", fontWeight: 700, fontSize: "14px", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "8px", background: t.surface, border: `1.5px solid ${t.border}`, color: t.text, transition: "opacity 0.15s" };
   const btnPrimary   = { padding: "11px 28px", borderRadius: "10px", fontWeight: 700, fontSize: "14px", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "8px", border: "none", background: t.active, color: "#fff", transition: "opacity 0.15s" };
 
@@ -1136,6 +1233,15 @@ function Wizard({ inp, Ic, t, step, setStep, search, setSearch, wProduct, setWPr
                     </div>
                   );
                 })}
+              {/* Sentinel: triggers loading the next page when visible. */}
+              {!shopifyLoading && filteredShopify.length > 0 && (
+                <div ref={sentinelRef} style={{ height: "1px" }} />
+              )}
+              {shopifyLoadingMore && (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "14px", color: t.muted, fontSize: "13px" }}>
+                  Loading more products…
+                </div>
+              )}
             </div>
           </div>
         )}

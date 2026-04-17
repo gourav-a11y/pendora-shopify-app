@@ -1,6 +1,6 @@
 import prisma from "../db.server";
 import { generateEmailDownloadToken } from "./token.server";
-import { sendMail } from "./mailer.server";
+import { sendMail, friendlyMailError } from "./mailer.server";
 
 const DEFAULTS = {
   subject: "Your digital files from {{shop_name}}",
@@ -187,14 +187,15 @@ export async function sendOrderEmail(shop, order) {
       });
     }
   } catch (err) {
-    console.error(`[Pendora] Email failed for ${customerEmail}:`, err.message);
+    console.error(`[Pendora] Email failed for ${customerEmail}:`, err?.message ?? err);
+    const displayError = friendlyMailError(err);
     for (const [productId, data] of Object.entries(productMap)) {
       await prisma.emailLog.create({
         data: {
           shop, orderId: String(order.id), orderNumber, customerName, customerEmail,
           productId, productTitle: data.productTitle,
           fileIds: JSON.stringify(data.files.map((f) => f.id)),
-          status: "failed", error: err.message, tokenExpiry,
+          status: "failed", error: displayError, tokenExpiry,
         },
       });
     }

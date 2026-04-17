@@ -1,6 +1,23 @@
 import crypto from "crypto";
 import prisma from "../db.server";
 
+// Retry a CDN fetch a few times before giving up — Shopify occasionally 503s.
+// Only safe to call BEFORE any bytes have been enqueued on the response stream.
+async function fetchWithRetry(url, attempts = 3, delayMs = 500) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return res;
+      lastErr = new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      lastErr = err;
+    }
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  throw lastErr ?? new Error("Fetch failed");
+}
+
 /**
  * App Proxy download endpoint.
  * URL: https://{store}.myshopify.com/apps/pendora/api/download/:fileId
@@ -112,8 +129,14 @@ export const loader = async ({ request, params }) => {
       async start(controller) {
         try {
           for (const chunkUrl of chunkUrls) {
-            const res = await fetch(chunkUrl);
-            if (!res.ok) { controller.error(new Error(`Chunk fetch failed (${res.status})`)); return; }
+            // Retry the initial fetch (not mid-stream — mid-stream errors must abort).
+            let res;
+            try {
+              res = await fetchWithRetry(chunkUrl, 3, 500);
+            } catch (err) {
+              controller.error(new Error(`Chunk fetch failed: ${err?.message ?? err}`));
+              return;
+            }
             const reader = res.body.getReader();
             while (true) {
               const { done, value } = await reader.read();
@@ -134,7 +157,7 @@ export const loader = async ({ request, params }) => {
   }
 
   let cdnRes;
-  try { cdnRes = await fetch(file.fileUrl); } catch { return new Response("Failed to reach CDN.", { status: 502 }); }
+  try { cdnRes = await fetchWithRetry(file.fileUrl, 3, 500); } catch { return new Response("Failed to reach CDN.", { status: 502 }); }
   if (!cdnRes.ok) return new Response("File unavailable.", { status: 502 });
 
   const contentLength = cdnRes.headers.get("content-length");

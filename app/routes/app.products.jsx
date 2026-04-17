@@ -4,6 +4,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { generateDownloadToken } from "../utils/token.server";
+import { syncProductFilesMetafield, buildFilesPayload } from "../utils/metafield.server";
 
 function formatFileSize(bytes) {
   if (!bytes) return "–";
@@ -194,13 +195,7 @@ export const loader = async ({ request }) => {
   const uniqueProductIds = [...new Set(filesResult.map((f) => f.productId))];
   for (const pid of uniqueProductIds) {
     const pFiles = filesResult.filter((f) => f.productId === pid);
-    const value = JSON.stringify(
-      pFiles.map((f) => ({ fileId: f.id, displayName: f.displayName || f.fileName, fileUrl: f.fileUrl }))
-    );
-    admin.graphql(
-      `mutation SyncMetafield($m: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $m) { metafields { id } userErrors { field message } } }`,
-      { variables: { m: [{ ownerId: pid, namespace: "pendora", key: "files", type: "json", value }] } }
-    ).catch((e) => console.error("[Pendora] Metafield sync failed:", e?.message ?? e));
+    void syncProductFilesMetafield(admin, pid, buildFilesPayload(pFiles));
   }
 
   // Group files by productId
@@ -254,13 +249,7 @@ export const action = async ({ request }) => {
         where: { shop, productId: file.productId },
         orderBy: { createdAt: "desc" },
       });
-      const value = JSON.stringify(
-        remaining.map((f) => ({ fileId: f.id, displayName: f.displayName || f.fileName, fileUrl: f.fileUrl }))
-      );
-      admin.graphql(
-        `mutation SyncMetafield($m: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $m) { metafields { id } userErrors { field message } } }`,
-        { variables: { m: [{ ownerId: file.productId, namespace: "pendora", key: "files", type: "json", value }] } }
-      ).catch((e) => console.error("[Pendora] Metafield update after delete failed:", e?.message ?? e));
+      void syncProductFilesMetafield(admin, file.productId, buildFilesPayload(remaining));
       return { success: "File deleted." };
     }
 
@@ -347,6 +336,9 @@ export default function ProductsPage() {
       });
       const stageData = await stageRes.json();
       if (!stageRes.ok || stageData.error) throw new Error(stageData.error || "Failed to prepare upload.");
+      if (!Array.isArray(stageData.targets) || stageData.targets.length < 1) {
+        throw new Error("Upload preparation incomplete. Please retry.");
+      }
       const target = stageData.targets[0];
       await new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
@@ -414,6 +406,9 @@ export default function ProductsPage() {
       });
       const stageData = await stageRes.json();
       if (!stageRes.ok || stageData.error) throw new Error(stageData.error || "Failed to prepare upload.");
+      if (!Array.isArray(stageData.targets) || stageData.targets.length !== wFiles.length) {
+        throw new Error("Upload preparation incomplete. Please retry.");
+      }
       const uploaded = [];
       for (let i = 0; i < wFiles.length; i++) {
         const file = wFiles[i];
