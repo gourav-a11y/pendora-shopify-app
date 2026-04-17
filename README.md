@@ -38,10 +38,12 @@ Pendora is an embedded Shopify app that bridges the gap between Shopify's physic
 ## Features
 
 ### Merchant Dashboard — Digital Products (`/app`)
+- **First-Run Setup Guide** — New merchants land on a 3-step onboarding card (Create your first digital product → Customize your delivery email → Your first customer delivery). Step completion is auto-derived from the app's own data (no flags to toggle); the card is dismissible, collapsible, and celebrates with a "You're all set" variant when all 3 are complete. Follows Shopify's [Setup Guide composition pattern](https://shopify.dev/docs/api/app-home/patterns/compositions/setup-guide).
 - **Product Card List** — All digital products displayed as cards with file name, type badge, size, and edit/delete options.
+- **Dashboard Search** — Live filter on the dashboard by product title. Shows `"X of Y products"` count while filtering, with a graceful no-match card and a ✕ clear button. Purely client-side — the full list is already in loader data.
 - **3-Step Wizard** — Create a digital product by choosing a Shopify product, uploading files (or reusing existing ones), and reviewing before saving.
 - **Infinite-Scroll Product Picker** — Wizard step 1 loads 20 Shopify products at a time with server-side pagination. Next 20 fetched automatically as the user scrolls close to the end — scales to stores with thousands of products without a performance hit.
-- **Server-Side Product Search** — Typing in the product search bar (300ms debounced) queries Shopify's admin GraphQL `products(query:)` directly, so matching is correct even across un-loaded pages.
+- **Server-Side Product Search** — Typing in the wizard's product search bar (300ms debounced) queries Shopify's admin GraphQL `products(query:)` directly, so matching is correct even across un-loaded pages.
 - **Use Existing Files** — Attach already-uploaded files to new products instantly — no re-upload needed.
 - **Detail View** — Click "Edit" on any product card to upload more files, preview, or delete.
 - **Clean Single-Column Layout** — Digital Products heading, product count, and Add Product button sit together in a single row at the top of the dashboard.
@@ -93,7 +95,7 @@ Pendora is an embedded Shopify app that bridges the gap between Shopify's physic
 |---|---|
 | Framework | [React Router v7](https://reactrouter.com/) |
 | Shopify Integration | [@shopify/shopify-app-react-router](https://shopify.dev/docs/api/shopify-app-react-router) |
-| UI Components | Custom inline styles (Shopify-matched Navy/Amber theme) |
+| UI Components | Shopify Polaris Web Components (`s-page` / `s-section` / `s-button` / `s-app-nav`) for routing shells, nav, and list pages + custom inline styles (Shopify-matched navy/amber theme) on the design-heavy dashboard/file-manager/email pages |
 | Checkout Extension | [@shopify/ui-extensions-react/checkout](https://shopify.dev/docs/api/checkout-ui-extensions) |
 | Database ORM | [Prisma](https://prisma.io/) |
 | Database | SQLite (dev) — swappable to PostgreSQL/MySQL for production |
@@ -102,6 +104,13 @@ Pendora is an embedded Shopify app that bridges the gap between Shopify's physic
 | Build Tool | [Vite](https://vitejs.dev/) |
 | Language | JavaScript (JSX) |
 | Runtime | Node.js >= 20.19 |
+
+### Shopify design-guideline compliance
+- **Navigation:** `<s-app-nav>` + `<s-link>` — integrates with Shopify admin sidebar.
+- **Routing shells:** `<s-page heading=...>` + `<s-section>` in `/app/new-product`, `/app/products`, `/app/product/:id`, `auth.login`.
+- **Onboarding:** Matches [Shopify's Setup Guide composition](https://shopify.dev/docs/api/app-home/patterns/compositions/setup-guide) — 3 steps, per-step CTA, progress counter, dismissible.
+- **Theming:** Custom pages use a single navy/amber token set (`t.surface`, `t.active`, `t.accent`, `t.success`, `t.danger`) for visual consistency across `/app`, `/app/files`, `/app/email`.
+- **Accessibility:** Role-labelled regions on interactive cards, keyboard-operable dismiss/collapse buttons, ARIA labels on icon-only controls.
 
 ---
 
@@ -184,6 +193,9 @@ pendora-test/
 │   │   ├── webhooks.customers.data-request.jsx  # GDPR data request
 │   │   ├── webhooks.customers.redact.jsx        # GDPR customer redact
 │   │   └── webhooks.shop.redact.jsx             # GDPR shop redact
+│   │
+│   ├── components/
+│   │   └── OnboardingGuide.jsx             # First-run Setup Guide card (dismissible)
 │   │
 │   ├── utils/
 │   │   ├── token.server.js                 # HMAC tokens (1h dashboard + 7d email)
@@ -532,6 +544,8 @@ Dashboard tokens expire in 1 hour. Email tokens expire in 7 days. For customer d
 ## Recent Changes
 
 ### Scale & UX
+- First-run **Setup Guide** on `/app` — 3-step onboarding card (Create product → Customize email → First delivery). Auto-completes from app data, dismissible via localStorage, matches Shopify's Setup Guide composition pattern.
+- **Dashboard search bar** on `/app` — live filter of existing digital products by title, with `X of Y` count and a no-match card.
 - Wizard product picker → server-side cursor pagination (20 at a time, infinite scroll, ~5 rows early preload).
 - Server-side product search via Shopify admin GraphQL `products(query:)`.
 - Delivery log → server-side pagination (10/page) + multi-field search (customer name / email / product / file name).

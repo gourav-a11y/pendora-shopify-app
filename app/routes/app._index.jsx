@@ -5,6 +5,7 @@ import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { generateDownloadToken } from "../utils/token.server";
 import { syncProductFilesMetafield, buildFilesPayload } from "../utils/metafield.server";
+import OnboardingGuide from "../components/OnboardingGuide";
 
 function formatFileSize(bytes) {
   if (!bytes) return "–";
@@ -175,10 +176,20 @@ export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
 
   // ── Fast path: only SQLite — always < 100 ms ──────────────────────────────
-  const filesResult = await prisma.productFile.findMany({
-    where: { shop: session.shop },
-    orderBy: { createdAt: "desc" },
-  });
+  // Parallelize: files + the two tiny onboarding queries.
+  const [filesResult, templateRow, sentEmailCount] = await Promise.all([
+    prisma.productFile.findMany({
+      where: { shop: session.shop },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.emailTemplate.findUnique({
+      where: { shop: session.shop },
+      select: { id: true },
+    }),
+    prisma.emailLog.count({
+      where: { shop: session.shop, status: "sent" },
+    }),
+  ]);
 
   const productMap = {};
   for (const f of filesResult) {
@@ -198,7 +209,13 @@ export const loader = async ({ request }) => {
 
   // shopifyProducts are NOT loaded here — they are lazy-loaded by the client
   // via /api/products (with caching) only when the wizard opens.
-  return { digitalProducts: Object.values(productMap) };
+  return {
+    digitalProducts: Object.values(productMap),
+    onboarding: {
+      hasEmailTemplate: !!templateRow,
+      hasSentEmail: sentEmailCount > 0,
+    },
+  };
 };
 
 // ─── Action ───────────────────────────────────────────────────────────────────
@@ -244,7 +261,7 @@ export const action = async ({ request }) => {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function HomePage() {
-  const { digitalProducts } = useLoaderData();
+  const { digitalProducts, onboarding = { hasEmailTemplate: false, hasSentEmail: false } } = useLoaderData();
   const deleteFetcher = useFetcher();
   const productDeleteFetcher = useFetcher();
   const shopifyFetcher = useFetcher(); // lazy-loads /api/products only when wizard opens
@@ -288,6 +305,34 @@ export default function HomePage() {
   const [productDeleteError, setProductDeleteError] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null); // { id, name, fileCount }
   const [fileDeleteError, setFileDeleteError] = useState(null);
+  // Dashboard search — filters digitalProducts by productTitle (client-side; full list
+  // already loaded from local DB by the loader, so no server round-trip needed).
+  const [dashboardSearch, setDashboardSearch] = useState("");
+
+  // Onboarding — dismissal & collapse persisted in localStorage (per-browser; see
+  // ONBOARDING_PLAN.md for why that's acceptable). `onboardingHydrated` gates the
+  // render so SSR output doesn't flash a card we'd immediately hide on the client.
+  const [onboardingHydrated, setOnboardingHydrated] = useState(false);
+  const [onboardingDismissed, setOnboardingDismissed] = useState(false);
+  const [onboardingCollapsed, setOnboardingCollapsed] = useState(false);
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("pendora_onboarding_dismissed") === "true") setOnboardingDismissed(true);
+      if (localStorage.getItem("pendora_onboarding_collapsed") === "true") setOnboardingCollapsed(true);
+    } catch {}
+    setOnboardingHydrated(true);
+  }, []);
+  const dismissOnboarding = () => {
+    setOnboardingDismissed(true);
+    try { localStorage.setItem("pendora_onboarding_dismissed", "true"); } catch {}
+  };
+  const toggleOnboardingCollapsed = () => {
+    setOnboardingCollapsed((prev) => {
+      const next = !prev;
+      try { localStorage.setItem("pendora_onboarding_collapsed", next ? "true" : "false"); } catch {}
+      return next;
+    });
+  };
 
   // Show file-delete error briefly then auto-clear
   useEffect(() => {
@@ -324,6 +369,48 @@ export default function HomePage() {
   const visibleProducts = digitalProducts
     .filter((p) => !deletedProductIds.has(p.productId))
     .map((p) => ({ ...p, files: p.files.filter((f) => !deletedFileIds.has(f.id)) }));
+
+  // Search-filtered list for render. Intentionally derived from visibleProducts so
+  // selectedId / detail-mode lookups still work against the unfiltered set.
+  const dashboardSearchLc = dashboardSearch.trim().toLowerCase();
+  const renderProducts = dashboardSearchLc
+    ? visibleProducts.filter((p) => (p.productTitle || "").toLowerCase().includes(dashboardSearchLc))
+    : visibleProducts;
+
+  // ── Onboarding steps ─────────────────────────────────────────────────────
+  // Step completion derives entirely from data the loader already fetched + the
+  // optimistic delete set — no extra queries, no mid-session staleness.
+  const hasAnyProduct = visibleProducts.length > 0;
+  const onboardingSteps = [
+    {
+      id: "add-product",
+      title: "Create your first digital product",
+      description: "Attach a PDF, ZIP, MP3, or any digital file to a Shopify product. Customers get it instantly after purchase.",
+      ctaLabel: "Add Product",
+      completed: hasAnyProduct,
+      onClick: () => openCreate(),
+    },
+    {
+      id: "customize-email",
+      title: "Customize your delivery email",
+      description: "Brand the download email your customers receive — change the subject, message, and button color.",
+      ctaLabel: "Customize email",
+      completed: !!onboarding.hasEmailTemplate,
+      onClick: () => navigate("/app/email"),
+    },
+    {
+      id: "first-delivery",
+      title: "Your first customer delivery",
+      description: "When a customer buys a digital product, Pendora automatically emails them a download link. You'll see it here once it happens.",
+      ctaLabel: "View delivery log",
+      completed: !!onboarding.hasSentEmail,
+      onClick: () => navigate("/app/email"),
+    },
+  ];
+  const completedCount = onboardingSteps.filter((s) => s.completed).length;
+  const allOnboardingComplete = completedCount === onboardingSteps.length;
+  // Only show after client hydration so a dismissed card doesn't flash on initial load.
+  const shouldShowOnboarding = onboardingHydrated && !onboardingDismissed && mode === "view";
 
   const selected = visibleProducts.find((p) => p.productId === selectedId) || null;
   // isBusy is per-product — only the product currently uploading is locked
@@ -926,24 +1013,56 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* ── Product Card List (view mode) ── */}
+        {/* ── Empty state / Onboarding (no products yet) ── */}
         {mode === "view" && !visibleProducts.length && !showSkeleton(isRevalidating, selected) && (
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: "16px", textAlign: "center", padding: "40px 48px" }}>
-            <div style={{ width: 64, height: 64, borderRadius: "16px", background: t.surface, border: `1px solid ${t.border}`, display: "flex", alignItems: "center", justifyContent: "center", color: t.faint, boxShadow: t.shadow }}>{Ic.box(30)}</div>
-            <div style={{ fontSize: "20px", fontWeight: 700, color: t.text }}>No digital products yet</div>
-            <div style={{ fontSize: "14px", color: t.muted, maxWidth: "360px", lineHeight: 1.7 }}>
-              Add your first product to start selling digital files to your customers.
+          shouldShowOnboarding ? (
+            <div style={{ padding: "24px 28px", maxWidth: "820px", margin: "0 auto", width: "100%" }}>
+              <OnboardingGuide
+                steps={onboardingSteps}
+                completedCount={completedCount}
+                totalSteps={onboardingSteps.length}
+                allComplete={allOnboardingComplete}
+                collapsed={onboardingCollapsed}
+                onToggleCollapse={toggleOnboardingCollapsed}
+                onDismiss={dismissOnboarding}
+                theme={t}
+              />
             </div>
-            <button onClick={openCreate} style={{ ...B.primary, padding: "11px 28px", fontSize: "14px", borderRadius: "10px", marginTop: "4px" }}>{Ic.plus(15)} Add Product</button>
-          </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: "16px", textAlign: "center", padding: "40px 48px" }}>
+              <div style={{ width: 64, height: 64, borderRadius: "16px", background: t.surface, border: `1px solid ${t.border}`, display: "flex", alignItems: "center", justifyContent: "center", color: t.faint, boxShadow: t.shadow }}>{Ic.box(30)}</div>
+              <div style={{ fontSize: "20px", fontWeight: 700, color: t.text }}>No digital products yet</div>
+              <div style={{ fontSize: "14px", color: t.muted, maxWidth: "360px", lineHeight: 1.7 }}>
+                Add your first product to start selling digital files to your customers.
+              </div>
+              <button onClick={openCreate} style={{ ...B.primary, padding: "11px 28px", fontSize: "14px", borderRadius: "10px", marginTop: "4px" }}>{Ic.plus(15)} Add Product</button>
+            </div>
+          )
         )}
 
         {mode === "view" && visibleProducts.length > 0 && !showSkeleton(isRevalidating, selected) && (
           <div style={{ padding: "24px 28px" }}>
-            <div style={{ marginBottom: "18px", display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px" }}>
+            {/* Onboarding card — shown above the product list until dismissed. */}
+            {shouldShowOnboarding && (
+              <OnboardingGuide
+                steps={onboardingSteps}
+                completedCount={completedCount}
+                totalSteps={onboardingSteps.length}
+                allComplete={allOnboardingComplete}
+                collapsed={onboardingCollapsed}
+                onToggleCollapse={toggleOnboardingCollapsed}
+                onDismiss={dismissOnboarding}
+                theme={t}
+              />
+            )}
+            <div style={{ marginBottom: "16px", display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px" }}>
               <div>
                 <div style={{ fontWeight: 700, fontSize: "17px", color: t.text }}>Digital Products</div>
-                <div style={{ fontSize: "13px", color: t.muted, marginTop: "3px" }}>{visibleProducts.length} {visibleProducts.length === 1 ? "product" : "products"}</div>
+                <div style={{ fontSize: "13px", color: t.muted, marginTop: "3px" }}>
+                  {dashboardSearchLc
+                    ? `${renderProducts.length} of ${visibleProducts.length} ${visibleProducts.length === 1 ? "product" : "products"}`
+                    : `${visibleProducts.length} ${visibleProducts.length === 1 ? "product" : "products"}`}
+                </div>
               </div>
               <button
                 onClick={isUploading ? undefined : openCreate}
@@ -952,9 +1071,33 @@ export default function HomePage() {
                 {Ic.plus(14)} Add Product
               </button>
             </div>
+            {/* Search bar — filters loaded products by title. */}
+            <div style={{ position: "relative", marginBottom: "14px", maxWidth: "420px" }}>
+              <span style={{ position: "absolute", left: "12px", top: "50%", transform: "translateY(-50%)", color: t.muted, pointerEvents: "none" }}>{Ic.search(14)}</span>
+              <input
+                type="text"
+                value={dashboardSearch}
+                onChange={(e) => setDashboardSearch(e.target.value)}
+                placeholder="Search digital products by name…"
+                style={{ ...inp, paddingLeft: "34px", paddingRight: dashboardSearch ? "32px" : "12px" }}
+              />
+              {dashboardSearch && (
+                <button
+                  onClick={() => setDashboardSearch("")}
+                  aria-label="Clear search"
+                  style={{ position: "absolute", right: "8px", top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: t.muted, fontSize: "16px", padding: "0 4px", lineHeight: 1 }}
+                >×</button>
+              )}
+            </div>
             {productDeleteError && <div style={{ padding: "10px 14px", background: t.dangerBg, border: `1px solid ${t.dangerBdr}`, borderRadius: "10px", color: t.danger, fontSize: "13px", marginBottom: "14px" }}>{productDeleteError}</div>}
+            {/* No-match state — only when there are products but the search filters them all out. */}
+            {renderProducts.length === 0 && (
+              <div style={{ padding: "32px 20px", textAlign: "center", background: t.surface, border: `1px solid ${t.border}`, borderRadius: "12px", color: t.muted, fontSize: "14px" }}>
+                No products match &ldquo;{dashboardSearch}&rdquo;.
+              </div>
+            )}
             <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-              {visibleProducts.map((product) => (
+              {renderProducts.map((product) => (
                 <div key={product.productId} style={{ background: t.surface, border: `1px solid ${t.border}`, borderRadius: "12px", boxShadow: t.shadow, overflow: "hidden" }}>
                   {/* Card header */}
                   <div style={{ padding: "14px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: product.files.length ? `1px solid ${t.border}` : "none" }}>
