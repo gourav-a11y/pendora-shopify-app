@@ -2,6 +2,7 @@ import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { sendMail, friendlyMailError } from "../utils/mailer.server";
 import { syncProductFilesMetafield, buildFilesPayload } from "../utils/metafield.server";
+import { encodeDeliveryToken } from "../utils/token.server";
 
 export const action = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
@@ -29,6 +30,24 @@ export const action = async ({ request }) => {
     void syncProductFilesMetafield(admin, file.productId, buildFilesPayload(remaining));
 
     return Response.json({ success: true, productRemoved: remaining.length === 0 });
+  }
+
+  // ── Update per-order download limit (single file) ─────────────────────────
+  if (_action === "set-limit") {
+    const { fileId, maxDownloadsPerOrder } = body;
+    if (!fileId) return Response.json({ error: "Missing file ID." }, { status: 400 });
+    // Normalize: empty / null / non-positive → null (unlimited); positive int → floor.
+    let limit = null;
+    if (maxDownloadsPerOrder !== null && maxDownloadsPerOrder !== undefined && maxDownloadsPerOrder !== "") {
+      const n = typeof maxDownloadsPerOrder === "number" ? maxDownloadsPerOrder : parseInt(String(maxDownloadsPerOrder), 10);
+      if (Number.isFinite(n) && n >= 1) limit = Math.floor(n);
+    }
+    const updated = await prisma.productFile.updateMany({
+      where: { id: fileId, shop },
+      data: { maxDownloadsPerOrder: limit },
+    });
+    if (!updated.count) return Response.json({ error: "File not found." }, { status: 404 });
+    return Response.json({ success: true, maxDownloadsPerOrder: limit });
   }
 
   // ── Replace file ───────────────────────────────────────────────────────────
@@ -120,7 +139,7 @@ async function notifyPreviousPurchasers(shop, oldFile, newFileName) {
               <span style="display:inline-block;background:rgba(245,165,36,0.12);color:#D48A06;font-size:10px;font-weight:800;padding:3px 8px;border-radius:5px;letter-spacing:0.3px;vertical-align:middle;margin-right:8px">${fileExt}</span>
               <span style="font-size:15px;font-weight:600;color:#303030;vertical-align:middle">${cleanName}</span>
             </div>
-            <a href="https://${shop}/apps/pendora/api/download/${oldFile.id}" style="display:inline-block;padding:10px 28px;background:${buttonColor};color:#fff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:700">Download</a>
+            <a href="https://${shop}/apps/pendora/api/dl/${encodeDeliveryToken({ fileId: oldFile.id, orderId: customer.orderId, expDays: 30 })}" style="display:inline-block;padding:10px 28px;background:${buttonColor};color:#fff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:700">Download</a>
           </td>
         </tr></table>
       </div>

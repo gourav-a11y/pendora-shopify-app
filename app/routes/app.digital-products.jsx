@@ -185,7 +185,7 @@ export const loader = async ({ request }) => {
     if (!productMap[f.productId]) {
       productMap[f.productId] = { productId: f.productId, productTitle: f.productTitle || "Unknown Product", files: [] };
     }
-    productMap[f.productId].files.push({ id: f.id, fileName: f.fileName, displayName: f.displayName || f.fileName, fileSize: formatFileSize(f.fileSize), status: f.status || "ready", createdAt: f.createdAt.toISOString(), downloadToken: generateDownloadToken(f.id) });
+    productMap[f.productId].files.push({ id: f.id, fileName: f.fileName, displayName: f.displayName || f.fileName, fileSize: formatFileSize(f.fileSize), status: f.status || "ready", maxDownloadsPerOrder: f.maxDownloadsPerOrder, createdAt: f.createdAt.toISOString(), downloadToken: generateDownloadToken(f.id) });
   }
 
   // Fire-and-forget metafield sync so checkout extension stays up to date.
@@ -273,6 +273,9 @@ export default function HomePage() {
   const [wProduct, setWProduct] = useState(null);
   const [wFiles, setWFiles] = useState([]);
   const [wExisting, setWExisting] = useState([]);  // existing files selected for cloning
+  // Per-order download cap applied to every file created in this wizard submission.
+  // Empty string = unlimited. Merchant can override per-file later from the detail view.
+  const [wMaxDownloads, setWMaxDownloads] = useState("");
   const [wSubmitting, setWSubmitting] = useState(false);
   const [wError, setWError] = useState(null);
   const [wCanRetry, setWCanRetry] = useState(false);       // show Retry button instead of Create
@@ -288,6 +291,11 @@ export default function HomePage() {
   const [productDeleteError, setProductDeleteError] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null); // { id, name, fileCount }
   const [fileDeleteError, setFileDeleteError] = useState(null);
+  // Inline per-file limit editor state. Keys are fileIds; value is the string currently
+  // being typed. Resets to the persisted limit after each successful save.
+  const [fileLimitDrafts, setFileLimitDrafts] = useState({});
+  const [fileLimitSaving, setFileLimitSaving] = useState({});
+  const [fileLimitMsg, setFileLimitMsg] = useState({}); // per-file toast: "Saved" | error
   // Lock background scroll + interaction while any modal is open.
   useEffect(() => {
     if (!confirmDelete) return;
@@ -378,16 +386,19 @@ export default function HomePage() {
     if (mode === "detail" && !selected) setMode("view");
   }, [mode, selected]);
 
-  // Deferred revalidation — navigate to same route forces a fresh loader run
+  // Deferred revalidation — useRevalidator.revalidate() re-runs the loader.
+  // Must be called AFTER setMode("view") lands so the newly-created product
+  // replaces the wizard with a freshly-loaded card. navigate(".", {replace:true})
+  // was a no-op on same-path, which is why the list stayed stale.
   useEffect(() => {
     if (pendingRevalidate.current && mode === "view") {
       pendingRevalidate.current = false;
-      navigate(".", { replace: true });
+      revalidate();
     }
-  }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mode, revalidate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectProduct = (id) => { setSelectedId(id); setMode("detail"); setUploadError(null); setUploadSuccess(null); };
-  const openCreate = () => { setMode("create"); setWStep(1); setWSearch(""); setWProduct(null); setWFiles([]); setWExisting([]); setWError(null); };
+  const openCreate = () => { setMode("create"); setWStep(1); setWSearch(""); setWProduct(null); setWFiles([]); setWExisting([]); setWMaxDownloads(""); setWError(null); };
 
   // Pre-fetch Shopify products on page load — by the time user clicks
   // "Add Product", the list is already cached and wizard opens instantly.
@@ -523,6 +534,36 @@ export default function HomePage() {
       setDisplayName(""); setUploadSuccess(`"${file.name}" uploaded successfully.`); revalidate();
     } catch (err) { console.error("[Pendora] Upload error:", err.message); setUploadError(err.message); }
     finally { setIsUploading(false); setUploadingProductId(null); setUploadProgress(0); setUploadSpeedBps(null); setUploadEta(null); }
+  };
+
+  // Save a per-file download cap. Optimistically updates the drafts map so the input
+  // reflects the new value immediately; revalidates after the action so the loader
+  // re-fetches ProductFile rows and the "saved" value everywhere stays in sync.
+  const handleSaveFileLimit = async (fileId, rawValue) => {
+    setFileLimitSaving((s) => ({ ...s, [fileId]: true }));
+    setFileLimitMsg((m) => ({ ...m, [fileId]: null }));
+    try {
+      const normalized = rawValue === "" ? null : (() => {
+        const n = parseInt(String(rawValue), 10);
+        return Number.isFinite(n) && n >= 1 ? n : null;
+      })();
+      const res = await fetch("/api/file-actions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ _action: "set-limit", fileId, maxDownloadsPerOrder: normalized }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "Save failed.");
+      setFileLimitMsg((m) => ({ ...m, [fileId]: { ok: true, text: "Saved" } }));
+      // Clear the draft so the input snaps back to the newly-saved persisted value.
+      setFileLimitDrafts((d) => { const n = { ...d }; delete n[fileId]; return n; });
+      revalidate();
+      setTimeout(() => setFileLimitMsg((m) => ({ ...m, [fileId]: null })), 2000);
+    } catch (err) {
+      setFileLimitMsg((m) => ({ ...m, [fileId]: { ok: false, text: err.message } }));
+    } finally {
+      setFileLimitSaving((s) => ({ ...s, [fileId]: false }));
+    }
   };
 
   const handleDeleteFile = (fileId) => {
@@ -709,9 +750,15 @@ export default function HomePage() {
       });
       } // end if (wFiles.length)
 
+      // Parse the per-order cap set in Step 3. Empty / non-positive → null (unlimited).
+      const maxDl = wMaxDownloads === "" ? null : (() => {
+        const n = parseInt(String(wMaxDownloads), 10);
+        return Number.isFinite(n) && n >= 1 ? n : null;
+      })();
+
       // ── 5. Save new uploads ──────────────────────────────────────────────
       if (uploaded.length) {
-        const svr = await fetch("/api/stage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent: "save", files: uploaded, productId: wProduct.id, productTitle: wProduct.title, downloadEnabled: true }) });
+        const svr = await fetch("/api/stage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent: "save", files: uploaded, productId: wProduct.id, productTitle: wProduct.title, downloadEnabled: true, maxDownloadsPerOrder: maxDl }) });
         const svd = await svr.json();
         if (!svr.ok || svd.error) throw new Error(svd.error || "Save failed.");
         console.log("[Pendora] Wizard: new files saved");
@@ -719,7 +766,7 @@ export default function HomePage() {
 
       // ── 6. Clone existing files (instant, no upload) ────────────────────
       if (wExisting.length) {
-        const cr = await fetch("/api/clone-file", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fileIds: wExisting.map((e) => e.id), productId: wProduct.id, productTitle: wProduct.title }) });
+        const cr = await fetch("/api/clone-file", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fileIds: wExisting.map((e) => e.id), productId: wProduct.id, productTitle: wProduct.title, maxDownloadsPerOrder: maxDl }) });
         const cd = await cr.json();
         if (!cr.ok || cd.error) throw new Error(cd.error || "Clone failed.");
         console.log(`[Pendora] Wizard: ${wExisting.length} existing files cloned`);
@@ -920,6 +967,7 @@ export default function HomePage() {
               step={wStep} setStep={setWStep} search={wSearch} setSearch={setWSearch}
               wProduct={wProduct} setWProduct={setWProduct} wFiles={wFiles} setWFiles={setWFiles}
               wExisting={wExisting} setWExisting={setWExisting} allExistingFiles={allExistingFiles}
+              wMaxDownloads={wMaxDownloads} setWMaxDownloads={setWMaxDownloads}
               wSubmitting={wSubmitting} wError={wError} wCanRetry={wCanRetry} wDonePartsRef={wDonePartsRef} wProgressText={wProgressText}
               filteredShopify={filteredShopify} shopifyLoading={shopifyLoading}
               shopifyLoadingMore={shopifyLoadingMore} loadMoreProducts={loadMoreProducts}
@@ -1162,29 +1210,60 @@ export default function HomePage() {
                 {fileDeleteError && <div style={{ padding: "9px 18px", background: t.dangerBg, color: t.danger, fontSize: "13px", borderBottom: `1px solid ${t.dangerBdr}` }}>{fileDeleteError}</div>}
                 {!visibleFiles.length
                   ? <div style={{ padding: "26px", textAlign: "center", color: t.faint, fontSize: "14px" }}>No files yet. Upload one above.</div>
-                  : visibleFiles.map((file, idx) => (
-                    <div key={file.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 18px", borderBottom: idx < visibleFiles.length - 1 ? `1px solid ${t.border}` : "none", transition: TRD }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: "11px" }}>
-                        <div style={{ width: 36, height: 36, borderRadius: "9px", background: t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: t.accent, flexShrink: 0, transition: TRD }}>{Ic.file(18)}</div>
-                        <div>
-                          <div style={{ fontWeight: 600, fontSize: "14px", color: t.text }}>{file.displayName}</div>
-                          {file.displayName !== file.fileName && <div style={{ fontSize: "11px", color: t.faint }}>{file.fileName}</div>}
-                          <div style={{ fontSize: "11px", color: t.muted, marginTop: "1px" }}>
-                            <span style={{ fontSize: "10px", fontWeight: 700, color: t.accent, background: `rgba(245,165,36,0.1)`, padding: "1px 6px", borderRadius: "4px", marginRight: "6px" }}>{getFileType(file.fileName)}</span>
-                            {file.fileSize} · {new Date(file.createdAt).toLocaleDateString()}
+                  : visibleFiles.map((file, idx) => {
+                    const savedLimit = file.maxDownloadsPerOrder == null ? "" : String(file.maxDownloadsPerOrder);
+                    const draft = fileLimitDrafts[file.id];
+                    const currentLimitValue = draft !== undefined ? draft : savedLimit;
+                    const isDirty = currentLimitValue !== savedLimit;
+                    const isSaving = !!fileLimitSaving[file.id];
+                    const msg = fileLimitMsg[file.id];
+                    return (
+                    <div key={file.id} style={{ padding: "12px 18px", borderBottom: idx < visibleFiles.length - 1 ? `1px solid ${t.border}` : "none", transition: TRD }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: "11px", minWidth: 0 }}>
+                          <div style={{ width: 36, height: 36, borderRadius: "9px", background: t.pill, display: "flex", alignItems: "center", justifyContent: "center", color: t.accent, flexShrink: 0, transition: TRD }}>{Ic.file(18)}</div>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontWeight: 600, fontSize: "14px", color: t.text, wordBreak: "break-word" }}>{file.displayName}</div>
+                            {file.displayName !== file.fileName && <div style={{ fontSize: "11px", color: t.faint, wordBreak: "break-word" }}>{file.fileName}</div>}
+                            <div style={{ fontSize: "11px", color: t.muted, marginTop: "1px" }}>
+                              <span style={{ fontSize: "10px", fontWeight: 700, color: t.accent, background: `rgba(245,165,36,0.1)`, padding: "1px 6px", borderRadius: "4px", marginRight: "6px" }}>{getFileType(file.fileName)}</span>
+                              {file.fileSize} · {new Date(file.createdAt).toLocaleDateString()}
+                            </div>
                           </div>
                         </div>
+                        <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
+                          <a href={`/api/files/${file.id}?token=${file.downloadToken}`} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}>
+                            <button style={B.secondary}>{Ic.download(14)} Preview</button>
+                          </a>
+                          <button onClick={() => handleDeleteFile(file.id)} disabled={isBusy} style={{ ...B.danger, opacity: isBusy ? 0.5 : 1, cursor: isBusy ? "not-allowed" : "pointer" }}>
+                            {Ic.trash(14)} Delete
+                          </button>
+                        </div>
                       </div>
-                      <div style={{ display: "flex", gap: "8px" }}>
-                        <a href={`/api/files/${file.id}?token=${file.downloadToken}`} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}>
-                          <button style={B.secondary}>{Ic.download(14)} Preview</button>
-                        </a>
-                        <button onClick={() => handleDeleteFile(file.id)} disabled={isBusy} style={{ ...B.danger, opacity: isBusy ? 0.5 : 1, cursor: isBusy ? "not-allowed" : "pointer" }}>
-                          {Ic.trash(14)} Delete
+                      <div style={{ marginTop: "10px", paddingTop: "10px", borderTop: `1px dashed ${t.border}`, display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+                        <span style={{ fontSize: "12px", fontWeight: 600, color: t.muted }}>Max downloads per customer:</span>
+                        <input
+                          type="number"
+                          min="1"
+                          placeholder="unlimited"
+                          value={currentLimitValue}
+                          onChange={(e) => setFileLimitDrafts((d) => ({ ...d, [file.id]: e.target.value.replace(/[^0-9]/g, "") }))}
+                          disabled={isSaving}
+                          style={{ ...inp, width: "120px", padding: "6px 10px", fontSize: "13px" }}
+                        />
+                        <button
+                          onClick={() => handleSaveFileLimit(file.id, currentLimitValue)}
+                          disabled={!isDirty || isSaving}
+                          style={{ ...B.secondary, padding: "6px 14px", fontSize: "12px", opacity: (!isDirty || isSaving) ? 0.5 : 1, cursor: (!isDirty || isSaving) ? "not-allowed" : "pointer" }}
+                        >
+                          {isSaving ? "Saving…" : "Save"}
                         </button>
+                        {msg && <span style={{ fontSize: "12px", fontWeight: 600, color: msg.ok ? t.success : t.danger }}>{msg.text}</span>}
+                        {savedLimit === "" && !isDirty && <span style={{ fontSize: "12px", color: t.faint }}>(unlimited)</span>}
                       </div>
                     </div>
-                  ))
+                    );
+                  })
                 }
               </div>
             </div>
@@ -1223,7 +1302,7 @@ export default function HomePage() {
 
 // ─── Wizard ───────────────────────────────────────────────────────────────────
 
-function Wizard({ inp, Ic, t, step, setStep, search, setSearch, wProduct, setWProduct, wFiles, setWFiles, wExisting, setWExisting, allExistingFiles, wSubmitting, wError, wCanRetry, wDonePartsRef, wProgressText, filteredShopify, shopifyLoading, shopifyLoadingMore, loadMoreProducts, wizardFileInputRef, wizardPickFiles, handleWizardSubmit, onCancel }) {
+function Wizard({ inp, Ic, t, step, setStep, search, setSearch, wProduct, setWProduct, wFiles, setWFiles, wExisting, setWExisting, allExistingFiles, wMaxDownloads, setWMaxDownloads, wSubmitting, wError, wCanRetry, wDonePartsRef, wProgressText, filteredShopify, shopifyLoading, shopifyLoadingMore, loadMoreProducts, wizardFileInputRef, wizardPickFiles, handleWizardSubmit, onCancel }) {
   // Sentinel observer — fires when user scrolls near the end of the list.
   // rootMargin 400px = roughly 5 product rows (~75px each) before the sentinel enters viewport,
   // so the next batch starts fetching while the user is still viewing products 15-ish of 20.
@@ -1465,6 +1544,21 @@ function Wizard({ inp, Ic, t, step, setStep, search, setSearch, wProduct, setWPr
                     <div key={`e-${ef.id}`} style={{ fontSize: "14px", fontWeight: 600, color: t.text, marginBottom: "3px" }}>{ef.displayName || ef.fileName} <span style={{ fontWeight: 400, color: t.accent, fontSize: "12px" }}>({ef.fileSize}) · Existing · Instant</span></div>
                   ))}
                 </div>
+              </div>
+              <div style={{ marginTop: "18px", paddingTop: "16px", borderTop: `1px solid ${t.border}`, display: "flex", alignItems: "center", gap: "14px", flexWrap: "wrap" }}>
+                <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+                  <div style={{ fontSize: "13px", fontWeight: 700, color: t.text, marginBottom: "2px" }}>Max downloads per customer</div>
+                  <div style={{ fontSize: "12px", color: t.muted }}>Blank = unlimited. Each customer's order can download up to this many times.</div>
+                </div>
+                <input
+                  type="number"
+                  min="1"
+                  placeholder="unlimited"
+                  value={wMaxDownloads}
+                  onChange={(e) => setWMaxDownloads(e.target.value.replace(/[^0-9]/g, ""))}
+                  disabled={wSubmitting}
+                  style={{ ...inp, width: "130px", flexShrink: 0 }}
+                />
               </div>
             </div>
             {wError && <div style={{ padding: "12px 16px", background: wCanRetry ? "#fef9e7" : t.dangerBg, border: `1px solid ${wCanRetry ? "#e6c84e" : t.dangerBdr}`, borderRadius: "10px", color: wCanRetry ? "#8a6d0b" : t.danger, fontSize: "14px" }}>{wError}</div>}

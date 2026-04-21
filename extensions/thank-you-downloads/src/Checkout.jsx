@@ -2,6 +2,8 @@ import {
   reactExtension,
   useAppMetafields,
   useShop,
+  useApi,
+  useSubscription,
   BlockStack,
   InlineStack,
   InlineLayout,
@@ -19,6 +21,10 @@ export default reactExtension(
   () => <ThankYouDownloads />
 );
 
+// Stable stub for useSubscription when the target doesn't expose `orderConfirmation`.
+// Keeps useSubscription's dep array stable and keeps the component rendering.
+const NULL_CONFIRMATION_SUB = { current: null, subscribe: () => () => {} };
+
 function cleanFileName(name) {
   if (!name) return "File";
   const noExt = name.replace(/\.[^.]+$/, "");
@@ -34,6 +40,17 @@ function getFileExt(name) {
 function ThankYouDownloads() {
   const { myshopifyDomain } = useShop();
   const metafields = useAppMetafields({ namespace: "pendora", key: "files" }) || [];
+  // Scope per-order download limit to this order. purchase.thank-you.block.render
+  // exposes OrderConfirmationApi with `orderConfirmation`; we pull the order GID
+  // and extract the numeric tail so it matches what the webhook stored in EmailLog.
+  // Defensive fallback via NULL_CONFIRMATION_SUB keeps the component from crashing
+  // if the API surface ever changes.
+  const api = useApi();
+  const confirmationSub = ("orderConfirmation" in api && api.orderConfirmation)
+    ? api.orderConfirmation
+    : NULL_CONFIRMATION_SUB;
+  const confirmation = useSubscription(confirmationSub);
+  const orderId = confirmation?.order?.id ? String(confirmation.order.id).split("/").pop() : null;
 
   const allFiles = metafields.flatMap((entry) => {
     const raw = entry?.metafield?.value;
@@ -85,7 +102,7 @@ function ThankYouDownloads() {
                   </Text>
                 </BlockStack>
                 <Button
-                  to={`${proxyBase}/api/download/${file.fileId}`}
+                  to={`${proxyBase}/api/download/${file.fileId}${orderId ? `?oid=${orderId}` : ""}`}
                   kind="primary"
                   accessibilityLabel={`Download ${name}`}
                 >

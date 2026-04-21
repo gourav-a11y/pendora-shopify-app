@@ -29,6 +29,61 @@ export function generateEmailDownloadToken(fileId) {
 }
 
 /**
+ * Opaque delivery token carried in customer-facing URLs. Wraps { fileId, orderId }
+ * in a signed + base64-encoded blob so the URL itself doesn't expose either value.
+ * Decoded by the /api/dl/:token route, which then applies the same shop /
+ * downloadEnabled / maxDownloadsPerOrder checks as the fileId route.
+ *
+ * NOTE: This is ON TOP OF the Shopify App Proxy HMAC. The App Proxy signs every
+ * request so an attacker can't just craft a URL; this extra token is to mask the
+ * payload values (fileId CUID, orderId) from casual viewers of the email link.
+ */
+export function encodeDeliveryToken({ fileId, orderId = null, expDays = 30 }) {
+  const payload = {
+    f: fileId,
+    o: orderId || null,
+    e: Math.floor(Date.now() / 1000) + (expDays * 24 * 3600),
+  };
+  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  // 32-char truncated HMAC keeps the token reasonably short while still providing
+  // 128 bits of integrity (App Proxy HMAC remains the primary auth).
+  const sig = crypto.createHmac("sha256", getSecret()).update(payloadB64).digest("hex").slice(0, 32);
+  return `${payloadB64}.${sig}`;
+}
+
+/**
+ * Verify + decode a delivery token. Returns { fileId, orderId } on success, null
+ * on bad signature / malformed payload / expired token.
+ */
+export function decodeDeliveryToken(token) {
+  if (!token || typeof token !== "string") return null;
+  const dot = token.lastIndexOf(".");
+  if (dot === -1) return null;
+  const payloadB64 = token.substring(0, dot);
+  const sig = token.substring(dot + 1);
+
+  const expected = crypto.createHmac("sha256", getSecret()).update(payloadB64).digest("hex").slice(0, 32);
+  try {
+    const a = Buffer.from(sig, "hex");
+    const b = Buffer.from(expected, "hex");
+    if (a.length !== b.length) return null;
+    if (!crypto.timingSafeEqual(a, b)) return null;
+  } catch {
+    return null;
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString());
+  } catch {
+    return null;
+  }
+  if (!payload?.f) return null;
+  if (typeof payload.e === "number" && payload.e < Math.floor(Date.now() / 1000)) return null;
+  return { fileId: String(payload.f), orderId: payload.o || null };
+}
+
+/**
  * Verify a download token. Returns true if valid, false otherwise.
  */
 export function verifyDownloadToken(token, fileId) {

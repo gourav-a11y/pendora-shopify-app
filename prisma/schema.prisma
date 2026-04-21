@@ -46,11 +46,31 @@ model ProductFile {
   displayName     String?
   downloadEnabled Boolean  @default(true)
   status          String   @default("ready")  // "pending" | "ready" | "failed"
+  // Per-customer download cap. null = unlimited. Enforced per (fileId, orderId)
+  // via the FileOrderDownload counter table. Resend resets the counter.
+  maxDownloadsPerOrder Int?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   @@index([shop, productId])
   @@index([shop, createdAt])
+}
+
+// Per-customer download counter for limit enforcement.
+// One row per (fileId, orderId) pair; `count` increments on each successful download.
+// When a merchant resends the email, the corresponding row is deleted so the
+// customer gets a fresh allotment of downloads up to maxDownloadsPerOrder.
+model FileOrderDownload {
+  id        String   @id @default(cuid())
+  shop      String
+  fileId    String
+  orderId   String
+  count     Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([fileId, orderId])
+  @@index([shop, fileId])
 }
 
 model EmailTemplate {

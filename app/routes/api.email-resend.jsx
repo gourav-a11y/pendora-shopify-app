@@ -1,6 +1,7 @@
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { sendMail, friendlyMailError } from "../utils/mailer.server";
+import { encodeDeliveryToken } from "../utils/token.server";
 
 function formatFileSize(bytes) {
   if (!bytes) return "";
@@ -50,9 +51,24 @@ export const action = async ({ request }) => {
   const cleanName = (name) => (name || "File").replace(/\.[^.]+$/, "").replace(/[-_\.~!@#$%^&*()+=\[\]{}|\\:;"'<>,?/]+/g, " ").replace(/\s+/g, " ").trim() || "File";
   const getExt = (name) => { const ext = (name || "").split(".").pop(); return ext && ext !== name ? ext.toUpperCase() : ""; };
 
+  // Resend grants a fresh allotment of downloads: delete any existing counter rows
+  // for this (fileId, orderId) so the customer starts back at 0 against the cap.
+  // Awaited (takes ms) so the new email's link is guaranteed to work when clicked;
+  // wrapped in try/catch so a DB blip still lets the email go out.
+  try {
+    await prisma.fileOrderDownload.deleteMany({
+      where: { shop, orderId: log.orderId, fileId: { in: files.map((f) => f.id) } },
+    });
+  } catch (err) {
+    console.error("[Pendora] Resend counter reset failed:", err?.message ?? err);
+  }
+
+  // Each resent link wraps { fileId, orderId } in an opaque signed token so the
+  // URL doesn't expose raw fileId/orderId. Per-order limit enforcement still works.
   const fileRows = files.map((f) => {
     const ext = getExt(f.fileName);
     const display = cleanName(f.displayName || f.fileName);
+    const dl = encodeDeliveryToken({ fileId: f.id, orderId: log.orderId, expDays: 30 });
     return `<tr>
     <td style="padding:14px 16px;border-bottom:1px solid #eee">
       <div style="margin-bottom:10px">
@@ -60,7 +76,7 @@ export const action = async ({ request }) => {
         <span style="font-size:15px;font-weight:600;color:#303030;vertical-align:middle">${display}</span>
         <span style="font-size:12px;color:#999;vertical-align:middle;margin-left:6px">${formatFileSize(f.fileSize)}</span>
       </div>
-      <a href="https://${shop}/apps/pendora/api/download/${f.id}" style="display:inline-block;padding:10px 28px;background:${buttonColor};color:#fff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:700">Download</a>
+      <a href="https://${shop}/apps/pendora/api/dl/${dl}" style="display:inline-block;padding:10px 28px;background:${buttonColor};color:#fff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:700">Download</a>
     </td>
   </tr>`;}).join("");
 

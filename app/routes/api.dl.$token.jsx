@@ -1,21 +1,20 @@
 import crypto from "crypto";
+import { decodeDeliveryToken } from "../utils/token.server";
 import { streamDownload } from "../utils/download.server";
 
 /**
- * Legacy App Proxy download endpoint (plain fileId in path).
+ * Tokenized App Proxy download endpoint.
+ * URL: /apps/pendora/api/dl/:token
  *
- * Still used by:
- *  - The thank-you extension for any downloads that don't yet have an order-scoped
- *    tokenized URL (defensive fallback)
- *  - Emails sent before Phase 2b (token-masked URLs)
+ * The token is an opaque signed blob that wraps { fileId, orderId, exp } — so the
+ * raw fileId and orderId are hidden from casual viewers of the customer's email link.
  *
- * New email send paths use /api/dl/:token instead, which masks fileId + orderId
- * inside an opaque signed payload.
- *
- * Security layers stay the same:
- *  1. Verify Shopify proxy HMAC signature
- *  2. Shared streamDownload() helper enforces shop-ownership, downloadEnabled,
- *     per-order limit, and CDN URL whitelist.
+ * Security layers:
+ *  1. Shopify App Proxy HMAC signature (proves request came via the proxy)
+ *  2. Delivery token HMAC signature (proves fileId/orderId pair wasn't forged
+ *     and hasn't expired)
+ *  3. streamDownload() enforces shop-ownership, downloadEnabled, per-order limit,
+ *     and CDN URL whitelist.
  */
 
 function verifyProxySignature(searchParams) {
@@ -45,16 +44,19 @@ function verifyProxySignature(searchParams) {
 }
 
 export const loader = async ({ request, params }) => {
-  const { fileId } = params;
-  if (!fileId) return new Response("Missing file ID.", { status: 400 });
+  const { token } = params;
+  if (!token) return new Response("Missing token.", { status: 400 });
 
   const url = new URL(request.url);
   if (!verifyProxySignature(url.searchParams)) {
     return new Response("Unauthorized.", { status: 401 });
   }
 
-  const shop = url.searchParams.get("shop") || "";
-  const orderId = url.searchParams.get("oid") || null;
+  const decoded = decodeDeliveryToken(token);
+  if (!decoded) {
+    return new Response("This download link is invalid or has expired.", { status: 403 });
+  }
 
-  return streamDownload({ shop, fileId, orderId });
+  const shop = url.searchParams.get("shop") || "";
+  return streamDownload({ shop, fileId: decoded.fileId, orderId: decoded.orderId });
 };

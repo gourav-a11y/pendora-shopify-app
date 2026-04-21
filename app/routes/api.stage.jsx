@@ -26,6 +26,14 @@ function sanitizeMimeType(mimeType) {
   return ALLOWED_MIME_TYPES.has(mt) ? mt : "application/octet-stream";
 }
 
+/** Accept undefined/null/"" as "no cap"; otherwise require a positive int. */
+function normalizeLimit(raw) {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const n = typeof raw === "number" ? raw : parseInt(String(raw), 10);
+  if (!Number.isFinite(n) || n < 1) return null;
+  return Math.floor(n);
+}
+
 /**
  * Two-phase upload endpoint — JSON only, no binary data, no tunnel issues.
  *
@@ -113,9 +121,13 @@ export const action = async ({ request }) => {
 
   // ── Phase 2: Register files + save DB records ────────────────────────────
   if (intent === "save") {
-    const { files, productId, productTitle, downloadEnabled } = body;
+    const { files, productId, productTitle, downloadEnabled, maxDownloadsPerOrder } = body;
     if (!files?.length) return Response.json({ error: "No files to save." }, { status: 400 });
     if (!productId) return Response.json({ error: "No product specified." }, { status: 400 });
+
+    // Normalize the optional limit: accept undefined / null / "" as "no limit";
+    // anything else must be a positive integer.
+    const normalizedLimit = normalizeLimit(maxDownloadsPerOrder);
 
     // Save all records in one transaction — single DB commit, no sequential round-trips.
     // Chunked files: fileUrl = null, chunkUrls = JSON array of resourceUrls.
@@ -136,6 +148,7 @@ export const action = async ({ request }) => {
               fileSize: f.fileSize != null ? BigInt(f.fileSize) : null,
               displayName: f.displayName || f.filename,
               downloadEnabled: downloadEnabled !== false,
+              maxDownloadsPerOrder: normalizedLimit,
               status: "pending",
             },
           })
@@ -198,20 +211,29 @@ export const action = async ({ request }) => {
         }
         if (!shopifyFiles.length) return;
 
-        // Poll all in parallel — get final CDN URL for each.
+        // Poll all in parallel — get final CDN URL for each. Returns null (not the
+        // staged URL!) if polling fails; downstream marks that file as failed so
+        // we never persist a stale shopify-staged-uploads URL that expires in 24h.
+        // Budget: 60 attempts × 3s = 3 minutes per file, plus early exit on FAILED.
         const finalUrls = await Promise.all(
-          shopifyFiles.map(async (sf, i) => {
-            if (!sf?.id) return itemsToRegister[i]?.resourceUrl;
-            for (let attempt = 0; attempt < 30; attempt++) {
-              await new Promise((r) => setTimeout(r, 2000));
+          shopifyFiles.map(async (sf) => {
+            if (!sf?.id) return null;
+            for (let attempt = 0; attempt < 60; attempt++) {
+              await new Promise((r) => setTimeout(r, 3000));
               const pollRes = await admin.graphql(
                 `#graphql query PollFile($id: ID!) { node(id: $id) { ... on GenericFile { fileStatus url } } }`,
                 { variables: { id: sf.id } }
               );
-              const cdnUrl = (await pollRes.json()).data?.node?.url;
-              if (cdnUrl) return cdnUrl;
+              const node = (await pollRes.json()).data?.node;
+              if (node?.url) return node.url;
+              // Abort early on FAILED status — Shopify won't produce a URL.
+              if (node?.fileStatus === "FAILED") {
+                console.error(`[Pendora] Shopify reported FAILED for file ${sf.id}`);
+                return null;
+              }
             }
-            return itemsToRegister[i]?.resourceUrl; // fallback
+            console.error(`[Pendora] Polling timed out (3 min) for file ${sf.id}; marking as failed.`);
+            return null;
           })
         );
 
